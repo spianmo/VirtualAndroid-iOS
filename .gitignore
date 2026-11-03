@@ -1,0 +1,13 @@
+.logs/
+images/
+engine/qemu/
+engine/build-*/
+engine/run/
+third_party/dl/
+third_party/UTM/
+gfx/build-*/
+gfx/src/
+app/build/
+*.xcarchive
+DerivedData/
+.DS_Store
