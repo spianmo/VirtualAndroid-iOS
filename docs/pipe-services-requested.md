@@ -59,3 +59,22 @@ used. If a vsock device is present, the same `pipe:<service>` strings arrive ove
 | `opengles`, `GLProcessPipe`, `refcount` | gfx (libva_gfx via `VaGfxEngineOps.pipe_add_type`) |
 | `qemud` (args `boot-properties`, `sensors`, `fingerprintlisten`, `gps`, `camera`, `hw-control`), `QemuMiscPipe`, `clipboard` | services (branch `services`) |
 | `zero`, `pingpong` | board (built-in test services in android_pipe.c) |
+
+## With services + renderer (master 281ac47f2, 300 s run: sys.boot_completed=1 at guest 13.9 s, then system_server watchdog restarts caused by the render stall)
+
+| count | request |
+|---|---|
+| 56 | `service=refcount args= found=1` |
+| 21 | `service=opengles args= found=1` |
+| 8 | `service=GLProcessPipe args= found=1` |
+| 2 | `service=qemud args=gps found=1` |
+| 1 | `service=qemud args=sensors found=1` |
+| 1 | `service=qemud args=fingerprintlisten found=1` |
+| 1 | `service=qemud args=camera found=1` |
+| 1 | `service=qemud args=boot-properties found=1` |
+| 1 | `service=clipboard args= found=1` |
+| 1 | `service=QemuMiscPipe args= found=1` |
+
+Seen for the first time once earlier connects succeed: `GLProcessPipe`, `refcount` (one per
+gralloc buffer), `qemud:gps`, `qemud:camera`, `QemuMiscPipe`, `clipboard` (over vsock port 5000
+via services' va-vsock pipe-port, so it also goes through the same registry).
