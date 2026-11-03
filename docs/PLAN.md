@@ -25,6 +25,23 @@ iOS App：点开即进入完整的 Android 13（AOSP，arm64）桌面。整机�
 - 我们自编的 QEMU 10.0.12-utm 用原版 `virt`+HVF，已跑到 zygote/surfaceflinger；卡在
   `HostConnection: Failed to connect to host (QemuPipeStream)`：hwcomposer、gralloc、sensors、camera 全依赖 goldfish pipe。
 - 基准：官方模拟器 HVF 冷启动到 `sys.boot_completed=1` 用时 26 s。
+- **`-M ranchu`（engine/qemu master，hw/android）在 macOS HVF 上到 `sys.boot_completed=1`，客户机时间 13.9 s**
+  （services + libva_gfx 渲染器 + va-vsock；开机动画画面见 `docs/first-frame.png`）。之后 system_server 因渲染器卡死
+  （ANGLE `setAttachment` 持 FrameBuffer 锁）被 watchdog 反复重启，归 gfx 处理。
+- 客户机必需的设备：goldfish pipe(v2，客户机驱动版本 4)、sync、battery（`healthd: battery l=100 ... chg=a`），
+  以及 **PCI `goldfish_address_space`**（00:0b.0，[607d:f153] rev 1，BAR0 4 KiB 寄存器 + BAR1 8 GiB 区域）。
+  没有它 gralloc/hwcomposer 直接 abort（`GoldfishAddressSpaceHostMemoryAllocator failed to open`）。
+  只实现子设备 HostMemoryAllocator(5) 即可；BAR1 只占客户机物理地址，宿主内存按块 mmap 并映射进去，块要按宿主页 16 KiB 对齐，否则 HVF 不能当 RAM 映射。
+- API 33 GKI 内核**没有 goldfish-events 驱动**（设备树节点有，但不会 probe）。按键和触屏要走 virtio-input，
+  设备名必须是 `virtio_input_multi_touch_1`（触屏）和 `qwerty2`（键盘），这样才能对上 /vendor/usr/idc。
+  qwerty.kl 里 HOME 是 102，没有 172。
+- 管道服务连接串：`pipe:<服务>[:<参数>]\0`，服务名在第一个 `:` 处结束（`pipe:qemud:sensors` 打开的是服务 `qemud`，参数 `sensors`）。
+  所有客户端先试 vsock，失败再回落到 /dev/goldfish_pipe。adbd 只监听 vsock:5555。剪贴板只走 vsock 端口 5000。
+  开机请求的服务清单见 `docs/pipe-services-requested.md`。
+- 渲染器 ANGLE Metal 上报 GLES 3.0，所以 bootconfig 要设 `androidboot.opengles.version=196608`（官方 swangle 是 196609）。
+  以 bootconfig 为准，qemud boot-properties 不再发这个属性。
+- HVF 下 ranchu 整机快照（`migrate` 存到文件再 `-incoming` 恢复）可用：打开着的 pingpong 管道及其中未读数据恢复后都还在。
+  注意不要在 VM 暂停时往串口灌输入。
 
 ## 架构
 ```
