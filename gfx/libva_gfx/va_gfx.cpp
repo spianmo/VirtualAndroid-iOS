@@ -711,6 +711,8 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_init(const VaGfxCon
          g.cfg.enable_vulkan ? "on" : "off", sync ? "on" : "off");
 
     android::base::setEnvironmentVariable("ANDROID_EMU_HEADLESS", "1");
+    // Deliver each posted frame synchronously (no async-readback frame lag).
+    setenv("GFXSTREAM_DISABLE_ASYNC_READBACK", "1", 0);
     if (angle) {
         android::base::setEnvironmentVariable("ANDROID_EGL_ON_EGL", "1");
         setupAngleLibraryPaths();

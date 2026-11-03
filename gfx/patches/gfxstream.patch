@@ -18,6 +18,22 @@ index 0000000..a31317b
 @@ -0,0 +1,2 @@
 +// Placeholder: Apple ar(1) refuses to create empty archives.
 +namespace gfxstream { int host_backend_placeholder = 0; }
+diff --git a/host/gl/EmulationGl.cpp b/host/gl/EmulationGl.cpp
+index e9d9757..1708517 100644
+--- a/host/gl/EmulationGl.cpp
++++ b/host/gl/EmulationGl.cpp
+@@ -605,7 +605,10 @@ void EmulationGl::disableFastBlitForTesting() {
+ }
+ 
+ bool EmulationGl::isAsyncReadbackSupported() const {
+-    return mGlesVersionMajor > 2;
++    // VirtualAndroid: the embedder may want every posted frame delivered
++    // immediately (no PBO mailbox lag), e.g. for static screens.
++    static const bool disabled = getenv("GFXSTREAM_DISABLE_ASYNC_READBACK") != nullptr;
++    return mGlesVersionMajor > 2 && !disabled;
+ }
+ 
+ std::unique_ptr<DisplaySurface> EmulationGl::createWindowSurface(
 diff --git a/host/gl/gl-host-common/meson.build b/host/gl/gl-host-common/meson.build
 index d102831..04dc53c 100644
 --- a/host/gl/gl-host-common/meson.build

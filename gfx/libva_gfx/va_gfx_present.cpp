@@ -109,10 +109,17 @@ extern "C" void vagfx_present_frame(int width, int height, int ydir, const unsig
     auto* dst = static_cast<uint8_t*>(IOSurfaceGetBaseAddress(s));
     const size_t dstStride = IOSurfaceGetBytesPerRow(s);
     const size_t srcStride = (size_t)width * 4;
-    for (int y = 0; y < height; y++) {
-        // ydir == -1: source rows are bottom-to-top (GL readback order).
-        const int srcRow = ydir < 0 ? height - 1 - y : y;
-        memcpy(dst + (size_t)y * dstStride, bgra + (size_t)srcRow * srcStride, srcStride);
+    // gfxstream reports ydir == -1 (GL readback order), but ColorBuffers keep
+    // Android's buffer layout (row 0 = top of the screen), so the rows are
+    // already top-down in screen space: copy straight (verified by the
+    // harness: GL bottom-left lands at the screen's bottom-left).
+    (void)ydir;
+    if (dstStride == srcStride) {
+        memcpy(dst, bgra, srcStride * (size_t)height);
+    } else {
+        for (int y = 0; y < height; y++) {
+            memcpy(dst + (size_t)y * dstStride, bgra + (size_t)y * srcStride, srcStride);
+        }
     }
     IOSurfaceUnlock(s, 0, nullptr);
 
