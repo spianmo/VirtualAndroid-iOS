@@ -64,6 +64,10 @@ fi
 [[ -f $RUN/initrd ]] || python3 -I $ROOT/tools/make_initrd.py $IMG/ramdisk.img $RUN/initrd
 rm -f $RUN/serial.log $RUN/logcat.log $RUN/hvc0.log $RUN/monitor.sock $RUN/milestones.txt
 
+# like tools/run-macos.sh: on ranchu log every goldfish pipe service the guest opens
+TRACE_OPT=()
+[[ $MACHINE == ranchu* ]] && TRACE_OPT=(-trace enable=android_pipe_connect)
+
 ARGS=(
   -M $MACHINE -accel tcg,thread=multi,tb-size=1024 -cpu cortex-a76 -smp 4 -m 2048 -nodefaults -display none
   -serial file:$RUN/serial.log -monitor unix:$RUN/monitor.sock,server,nowait
@@ -78,6 +82,7 @@ ARGS=(
   -device virtio-rng-device
   -chardev file,id=forhvc0,path=$RUN/hvc0.log -chardev file,id=forhvc1,path=$RUN/logcat.log
   -device virtio-serial-pci,ioeventfd=off -device virtconsole,chardev=forhvc0 -device virtconsole,chardev=forhvc1
+  $TRACE_OPT
   "$@"
 )
 echo "device $UDID, run dir $RUN, backend $BACKEND, timeout ${TIMEOUT}s"
