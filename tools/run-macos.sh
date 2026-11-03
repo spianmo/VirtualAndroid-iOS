@@ -14,6 +14,9 @@
 # ranchu loads the host renderer from --gfx-lib (default gfx/build-macos/dist/libva_gfx.dylib
 # if built; "none" = no graphics). --screenshot-dir DIR writes guest frames to DIR/latest.png
 # (+ the first few as frame-N.png; VA_DUMP_EVERY=N sets the interval, default 30 frames).
+# ranchu also adds services' va-vsock-pci (adb on 127.0.0.1:PORT via vsock, pipe-port 5000);
+# boot check: adb -s 127.0.0.1:PORT shell getprop sys.boot_completed
+# VA_HOST_PLATFORM=<libva_host_macos.dylib> (host/macos/build.sh) loads the test platform.
 #   QEMU=/path/to/qemu-system-aarch64 overrides the binary (each agent uses its own build dir).
 #
 # Per-run state lives in engine/run/<name> (default "dev"): writable disks,
@@ -52,9 +55,14 @@ if (( FRESH )) || [[ ! -f $RUN/userdata.img ]]; then
   mkfile -n 6g $RUN/userdata.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L data $RUN/userdata.img
   mkfile -n 64m $RUN/cache.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L cache $RUN/cache.img
 fi
-# Rebuild when the bootconfig defaults change.
-if [[ ! -f $RUN/initrd || $ROOT/tools/make_initrd.py -nt $RUN/initrd ]]; then
-  python3 -I $ROOT/tools/make_initrd.py $IMG/ramdisk.img $RUN/initrd
+# Bootconfig overrides. The host adb key lets adbd accept this machine without a prompt.
+INITRD_ARGS=()
+[[ -f ~/.android/adbkey.pub ]] && INITRD_ARGS+=("androidboot.qemu.adb.pubkey=$(tr -d '\n' < ~/.android/adbkey.pub)")
+# Rebuild when the bootconfig defaults or overrides change.
+INITRD_STAMP="$(shasum $ROOT/tools/make_initrd.py $IMG/ramdisk.img | awk '{print $1}' | tr -d '\n') ${(j: :)INITRD_ARGS}"
+if [[ ! -f $RUN/initrd || "$(cat $RUN/initrd.params 2>/dev/null)" != "$INITRD_STAMP" ]]; then
+  python3 -I $ROOT/tools/make_initrd.py $IMG/ramdisk.img $RUN/initrd $INITRD_ARGS
+  print -r -- "$INITRD_STAMP" > $RUN/initrd.params
 fi
 rm -f $RUN/serial.log $RUN/logcat.log $RUN/hvc0.log $RUN/console.sock
 SERIAL_OPT=(-serial file:$RUN/serial.log)
@@ -63,8 +71,13 @@ if (( CONSOLE )); then
               -serial chardev:ser0)
 fi
 
+NET_FWD=",hostfwd=tcp:127.0.0.1:$ADB_PORT-:5555" EXTRA_DEV=()
 if [[ $MACHINE == ranchu* ]]; then
   TRACES=(android_pipe_connect $TRACES)
+  # adbd (and clipboard etc. over pipe-port 5000) talk vsock: services' user-space vsock
+  # device bridges adb to 127.0.0.1:$ADB_PORT, so slirp doesn't forward it.
+  EXTRA_DEV=(-device va-vsock-pci,guest-cid=77,adb-port=$ADB_PORT,pipe-port=5000)
+  NET_FWD=""
   [[ $GFX_LIB == auto ]] && GFX_LIB=$ROOT/gfx/build-macos/dist/libva_gfx.dylib
   [[ $GFX_LIB == auto || ! -f $GFX_LIB ]] && [[ $GFX_LIB != none ]] && {
     echo "warning: no libva_gfx at $GFX_LIB, booting without graphics" >&2; GFX_LIB=none; }
@@ -87,10 +100,11 @@ ARGS=(
   -drive index=2,id=userdata,if=none,file=$RUN/userdata.img,format=raw -device virtio-blk-device,drive=userdata
   -drive index=3,id=cache,if=none,file=$RUN/cache.img,format=raw -device virtio-blk-device,drive=cache
   -drive index=4,id=system,if=none,file=$IMG/system.img,read-only=on,format=raw -device virtio-blk-device,drive=system
-  -netdev user,id=mynet,hostfwd=tcp:127.0.0.1:$ADB_PORT-:5555 -device virtio-net-device,netdev=mynet
+  -netdev user,id=mynet$NET_FWD -device virtio-net-device,netdev=mynet
   -device virtio-rng-device
   -chardev file,id=forhvc0,path=$RUN/hvc0.log -chardev file,id=forhvc1,path=$RUN/logcat.log
   -device virtio-serial-pci,ioeventfd=off -device virtconsole,chardev=forhvc0 -device virtconsole,chardev=forhvc1
+  $EXTRA_DEV
   $TRACE_OPT
   "$@"
 )

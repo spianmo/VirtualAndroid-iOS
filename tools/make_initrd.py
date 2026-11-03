@@ -29,7 +29,9 @@ DEFAULTS = {
     "androidboot.qemu.skin": "1080x2340",
     "androidboot.qemu.vsync": "60",
     "androidboot.qemu.settings.system.screen_off_timeout": "2147483647",
-    "androidboot.qemu.camera_protocol_ver": "1",
+    # The services' qemud camera speaks protocol v0 only (v1 needs a
+    # goldfish address-space camera sub-device).
+    "androidboot.qemu.camera_protocol_ver": "0",
     "androidboot.qemu.avd_name": "virtualandroid",
     # Values from the image's VerifiedBootParams.textproto.
     "androidboot.vbmeta.size": "6208",
