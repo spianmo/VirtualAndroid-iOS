@@ -63,6 +63,7 @@ final class VMController: ObservableObject, EngineDelegate {
         static let background = "VAKeepRunningInBackground", nav = "VANavControls", navExpanded = "VANavExpanded"
         // Developer overrides (launch arguments, e.g. `-VAMachine virt -VAAutoStopAfter 90`).
         static let machine = "VAMachine", autoStopAfter = "VAAutoStopAfter"
+        static let forceOrientation = "VAForceOrientation", selfTest = "VASelfTest"
     }
 
     init() {
@@ -129,6 +130,7 @@ final class VMController: ObservableObject, EngineDelegate {
     func launchIfNeeded() {
         guard !didAutoBoot else { return }
         didAutoBoot = true
+        applyForcedOrientation()
         if !imageInstalled, let pack = packLocation, engineKind != .stub {
             log(1, "first run: installing image pack from \(pack.path)")
             installImagePack(from: pack) { [weak self] ok in
@@ -282,6 +284,40 @@ final class VMController: ObservableObject, EngineDelegate {
         refreshImageState()
     }
 
+    // MARK: Developer hooks
+
+    /// `-VAForceOrientation landscapeLeft|landscapeRight|portrait` (the
+    /// simulator cannot be rotated from the command line).
+    private func applyForcedOrientation() {
+        guard let name = defaults.string(forKey: Keys.forceOrientation) else { return }
+        let mask: UIInterfaceOrientationMask
+        switch name {
+        case "landscapeLeft": mask = .landscapeLeft
+        case "landscapeRight": mask = .landscapeRight
+        case "portraitUpsideDown": mask = .portraitUpsideDown
+        default: mask = .portrait
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
+                Task { @MainActor in self.log(2, "orientation request failed: \(error.localizedDescription)") }
+            }
+            self.log(1, "requested interface orientation \(name)")
+        }
+    }
+
+    /// `-VASelfTest YES`: after boot, two fingers at fixed view positions
+    /// (30%,35%) and (70%,60%) stay down, then VOL+ and BACK are pressed.
+    private func runSelfTest() {
+        let v = displayView
+        let pts = [CGPoint(x: v.bounds.width * 0.3, y: v.bounds.height * 0.35),
+                   CGPoint(x: v.bounds.width * 0.7, y: v.bounds.height * 0.6)]
+        log(1, "self-test: touches at \(pts.map { "(\(Int($0.x)),\(Int($0.y)))" }.joined(separator: " ")) in \(Int(v.bounds.width))x\(Int(v.bounds.height))")
+        v.injectTestTouches(pts, down: true)
+        tapKey(LinuxKeymap.volumeUp)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.tapKey(LinuxKeymap.back) }
+    }
+
     // MARK: Image setup
 
     func installImagePack(from url: URL? = nil, securityScoped: Bool = false,
@@ -411,6 +447,9 @@ final class VMController: ObservableObject, EngineDelegate {
             if let start = bootStart, bootSeconds == nil {
                 bootSeconds = Date().timeIntervalSince(start)
                 log(1, String(format: "boot completed in %.1f s", bootSeconds!))
+            }
+            if defaults.bool(forKey: Keys.selfTest) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.runSelfTest() }
             }
             if quickBoot, launchConfig.restoreSnapshotTag == nil {
                 // First cold boot with quick boot on: snapshot once the home screen settled.

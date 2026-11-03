@@ -95,6 +95,8 @@ final class QemuEngine: VMEngine {
             o["androidboot.opengles.version"] = "\((major << 16) | minor)"
         } else if let cached = UserDefaults.standard.object(forKey: glesVersionKey) as? Int {
             o["androidboot.opengles.version"] = "\(cached)"
+        } else if gfxLibraryPath != nil {
+            o["androidboot.opengles.version"] = "196608"    // ANGLE Metal offers GLES 3.0 (gfx/README.md)
         }
         return o
     }

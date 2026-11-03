@@ -233,7 +233,10 @@ final class MetalDisplayView: UIView, FrameSink {
     }
 
     private func guestPoint(for touch: UITouch, in rect: CGRect) -> CGPoint {
-        let p = touch.location(in: self)
+        guestPoint(viewPoint: touch.location(in: self), in: rect)
+    }
+
+    private func guestPoint(viewPoint p: CGPoint, in rect: CGRect) -> CGPoint {
         let u = min(max((p.x - rect.minX) / rect.width, 0), 1)
         let v = min(max((p.y - rect.minY) / rect.height, 0), 1)
         return DisplayGeometry.guestPoint(u: u, v: v, quarterTurns: quarterTurns)
@@ -284,6 +287,18 @@ final class MetalDisplayView: UIView, FrameSink {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         sendTouches(touches, event: event, ended: true)
+    }
+
+    /// Developer self-test: fingers at view points (in this view's
+    /// coordinates) through the same view->guest mapping as real touches.
+    func injectTestTouches(_ viewPoints: [CGPoint], down: Bool) {
+        let rect = contentRectInView()
+        guard rect.width > 0 else { return }
+        let points = viewPoints.enumerated().map { i, p -> VaTouchPoint in
+            let g = guestPoint(viewPoint: p, in: rect)
+            return VaTouchPoint(slot: Int32(i), down: down, x: Float(g.x), y: Float(g.y), pressure: down ? 1 : 0)
+        }
+        input?.touch(points)
     }
 
     // MARK: Hardware keyboard

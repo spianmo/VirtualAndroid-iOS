@@ -3,23 +3,20 @@
 # they have been built, so the real engine becomes available at runtime
 # (QemuEngine.isAvailable). Without them the app runs the stub engine.
 #
-#   VA_ENGINE_XCFRAMEWORKS  directory with *.xcframework
-#                           (default: <repo>/engine/build-ios/xcframeworks)
+#   VA_ENGINE_XCFRAMEWORKS  ':'-separated directories with *.xcframework
+#                           (default: <repo>/engine/build-ios/xcframeworks
+#                            and <repo>/gfx/build-ios-xcframeworks)
 #   VA_STUB_ONLY=1          skip embedding entirely
 #
 # Every xcframework in the directory is embedded (QEMU, libva_gfx and their
 # dependencies such as glib/pixman), using the slice for $PLATFORM_NAME.
 set -euo pipefail
 
-SRC="${VA_ENGINE_XCFRAMEWORKS:-${SRCROOT}/../engine/build-ios/xcframeworks}"
+SRCS="${VA_ENGINE_XCFRAMEWORKS:-${SRCROOT}/../engine/build-ios/xcframeworks:${SRCROOT}/../gfx/build-ios-xcframeworks}"
 DEST="${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}"
 
 if [[ "${VA_STUB_ONLY:-0}" == 1 ]]; then
   echo "note: VA_STUB_ONLY=1, not embedding engine frameworks"
-  exit 0
-fi
-if [[ ! -d "$SRC" ]]; then
-  echo "note: no engine frameworks at $SRC; the app will use the stub engine"
   exit 0
 fi
 
@@ -32,7 +29,18 @@ esac
 mkdir -p "$DEST"
 shopt -s nullglob
 count=0
-for xc in "$SRC"/*.xcframework; do
+qemu_backends=""
+IFS=':' read -r -a dirs <<< "$SRCS"
+xcs=()
+for d in "${dirs[@]}"; do
+  if [[ -d "$d" ]]; then
+    xcs+=("$d"/*.xcframework)
+    [[ -f "$d/qemu-backends.txt" ]] && qemu_backends="$d/qemu-backends.txt"
+  else
+    echo "note: no engine frameworks at $d"
+  fi
+done
+for xc in ${xcs[@]+"${xcs[@]}"}; do
   slice=""
   for s in "$xc"/ios-*; do
     [[ -d "$s" ]] || continue
@@ -64,8 +72,8 @@ done
 # tcti = threaded interpreter) so the app picks matching -accel options.
 BACKEND_FILE="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/VAEngineBackend.txt"
 rm -f "$BACKEND_FILE"
-if [[ -f "$SRC/qemu-backends.txt" && -n "${qemu_slice:-}" ]]; then
-  backend=$(awk -F: -v s="$qemu_slice" '{gsub(/ /,"",$1); gsub(/ /,"",$2); if ($1==s) print $2}' "$SRC/qemu-backends.txt")
+if [[ -n "$qemu_backends" && -n "${qemu_slice:-}" ]]; then
+  backend=$(awk -F: -v s="$qemu_slice" '{gsub(/ /,"",$1); gsub(/ /,"",$2); if ($1==s) print $2}' "$qemu_backends")
   [[ -n "$backend" ]] && echo "$backend" > "$BACKEND_FILE" && echo "QEMU slice $qemu_slice backend: $backend"
 fi
-echo "embedded $count engine framework(s) from $SRC into $DEST"
+echo "embedded $count engine framework(s) into $DEST (stub engine only if none)"
