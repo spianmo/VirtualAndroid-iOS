@@ -1,0 +1,127 @@
+diff --git a/host/backend/meson.build b/host/backend/meson.build
+index b47d2ed..1dc720c 100644
+--- a/host/backend/meson.build
++++ b/host/backend/meson.build
+@@ -4,6 +4,7 @@
+ inc_host_backend = include_directories('include')
+ 
+ files_lib_host_backend = files(
++  'placeholder.cpp',
+ )
+ 
+ lib_host_backend = static_library(
+diff --git a/host/backend/placeholder.cpp b/host/backend/placeholder.cpp
+new file mode 100644
+index 0000000..a31317b
+--- /dev/null
++++ b/host/backend/placeholder.cpp
+@@ -0,0 +1,2 @@
++// Placeholder: Apple ar(1) refuses to create empty archives.
++namespace gfxstream { int host_backend_placeholder = 0; }
+diff --git a/host/gl/gl-host-common/meson.build b/host/gl/gl-host-common/meson.build
+index d102831..04dc53c 100644
+--- a/host/gl/gl-host-common/meson.build
++++ b/host/gl/gl-host-common/meson.build
+@@ -46,6 +46,7 @@ lib_gl_host_common = static_library(
+   'gl_host_common',
+   files_lib_gl_host_common,
+   cpp_args: gfxstream_host_args,
++  objc_args: gfxstream_host_args,
+   include_directories: [inc_gfxstream_include, inc_include, inc_gl_host_common, inc_host_features],
+   dependencies: [aemu_base_dep, aemu_common_dep, aemu_snapshot_dep],
+   link_with: [lib_host_features]
+diff --git a/host/gl/glestranslator/EGL/EglOsApi_egl.cpp b/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
+index 2fca845..f482fd8 100644
+--- a/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
++++ b/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
+@@ -81,8 +81,16 @@ static const char* kGLES2LibName = "libGLESv2.so";
+ 
+ #include "MacNative.h"
+ 
+-static const char* kEGLLibName = "libEGL.dylib";
+-static const char* kGLES2LibName = "libGLESv2.dylib";
++static const char* kEGLLibNameDefault = "libEGL.dylib";
++static const char* kGLES2LibNameDefault = "libGLESv2.dylib";
++// VirtualAndroid: allow the embedder to point at bundled ANGLE libraries
++// (e.g. inside an iOS app's Frameworks/ directory).
++static const char* eglLibNameFromEnv(const char* var, const char* dflt) {
++    const char* v = getenv(var);
++    return (v && *v) ? v : dflt;
++}
++#define kEGLLibName eglLibNameFromEnv("GFXSTREAM_EGL_LIB", kEGLLibNameDefault)
++#define kGLES2LibName eglLibNameFromEnv("GFXSTREAM_GLESV2_LIB", kGLES2LibNameDefault)
+ 
+ #endif // __APPLE__
+ 
+diff --git a/host/meson.build b/host/meson.build
+index 362af0a..bf25cbd 100644
+--- a/host/meson.build
++++ b/host/meson.build
+@@ -234,8 +234,11 @@ endif
+ 
+ if not use_gles
+   files_lib_gfxstream_backend += files('NativeSubWindow_stub.cpp')
+-elif host_machine.system() == 'darwin'
++elif host_machine.system() == 'darwin' and host_machine.subsystem() == 'macos'
+   files_lib_gfxstream_backend += files('NativeSubWindow_cocoa.mm')
++elif host_machine.system() == 'darwin'
++  # iOS: no AppKit; frames are delivered through the post callback.
++  files_lib_gfxstream_backend += files('NativeSubWindow_stub.cpp')
+ elif host_machine.system() == 'windows'
+   files_lib_gfxstream_backend += files('NativeSubWindow_win32.cpp')
+ elif host_machine.system() == 'linux' and use_gles
+@@ -282,6 +285,7 @@ gfxstream_backend = library(
+   'gfxstream_backend',
+   files_lib_gfxstream_backend,
+   cpp_args: gfxstream_host_args + gfxstream_backend_cpp_args,
++  objcpp_args: gfxstream_host_args + gfxstream_backend_cpp_args,
+   include_directories: [inc_gfxstream_backend, inc_glm],
+   gnu_symbol_visibility: 'default',
+   dependencies: deps_gfxstream_backend,
+diff --git a/host/vulkan/VkCommonOperations.cpp b/host/vulkan/VkCommonOperations.cpp
+index 5f8abc0..1f50451 100644
+--- a/host/vulkan/VkCommonOperations.cpp
++++ b/host/vulkan/VkCommonOperations.cpp
+@@ -836,7 +836,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
+ 
+ #if defined(__APPLE__)
+     std::vector<const char*> moltenVkInstanceExtNames = {
+-        VK_MVK_MACOS_SURFACE_EXTENSION_NAME,
++        VK_EXT_METAL_SURFACE_EXTENSION_NAME,
+         VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+     };
+     std::vector<const char*> moltenVkDeviceExtNames = {
+diff --git a/host/vulkan/VkDecoderGlobalState.cpp b/host/vulkan/VkDecoderGlobalState.cpp
+index f79a06d..049f445 100644
+--- a/host/vulkan/VkDecoderGlobalState.cpp
++++ b/host/vulkan/VkDecoderGlobalState.cpp
+@@ -8193,7 +8193,7 @@ class VkDecoderGlobalState::Impl {
+ 
+ #if defined(__APPLE__)
+         if (m_vkEmulation->supportsMoltenVk()) {
+-            res.push_back(VK_MVK_MACOS_SURFACE_EXTENSION_NAME);
++            res.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
+             res.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+         }
+ #endif
+diff --git a/meson.build b/meson.build
+index 3ea2e7a..faa8ec1 100644
+--- a/meson.build
++++ b/meson.build
+@@ -8,6 +8,16 @@ project('gfxstream', 'cpp', 'c',
+                             'b_ndebug=if-release'])
+ 
+ cc = meson.get_compiler('cpp')
++
++if host_machine.system() == 'darwin'
++  add_languages('objc', 'objcpp', native: false)
++  # No system EGL/GLES headers on Apple platforms: use the bundled Khronos ones.
++  add_project_arguments('-I' + meson.project_source_root() / 'common/opengl/include',
++                        language: ['c', 'cpp', 'objc', 'objcpp'])
++  # MoltenVK on macOS and iOS: VK_EXT_metal_surface / VK_EXT_metal_objects.
++  add_project_arguments('-DVK_USE_PLATFORM_METAL_EXT',
++                        language: ['c', 'cpp', 'objc', 'objcpp'])
++endif
+ prog_python = import('python').find_installation('python3')
+ 
+ #================#

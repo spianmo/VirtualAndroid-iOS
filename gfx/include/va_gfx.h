@@ -81,6 +81,13 @@ void va_gfx_register_pipe_services(void);
 /* The guest-visible renderer strings, for boot properties/logging. */
 const char *va_gfx_renderer_string(void);
 
+/*
+ * (gfx addition) Max GLES version the host renderer offers the guest, valid
+ * after va_gfx_init(). Use it for bootconfig androidboot.opengles.version =
+ * (major << 16) | minor. Returns 0 on success.
+ */
+int va_gfx_get_gles_version(int *major, int *minor);
+
 void va_gfx_teardown(void);
 
 #ifdef __cplusplus
