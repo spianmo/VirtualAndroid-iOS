@@ -49,12 +49,11 @@ LIBS+=("$PREFIX/lib/libaemu-host-common.a" "$PREFIX/lib/libaemu-base.a"
        "$PREFIX/lib/libaemu-snapshot.a" "$PREFIX/lib/libaemu-logging.a")
 
 FW=(-framework Foundation -framework IOSurface -framework CoreFoundation -framework QuartzCore
-    -framework Metal -framework CoreGraphics -framework IOKit)
+    -framework Metal -framework CoreGraphics)
 if [ "$PLATFORM" = "macos" ]; then
-  FW+=(-framework AppKit -framework OpenGL)
+  FW+=(-framework AppKit -framework OpenGL -framework IOKit)
   INSTALL_NAME="@rpath/libva_gfx.dylib"
 else
-  FW+=(-framework UIKit)
   INSTALL_NAME="@rpath/va_gfx.framework/va_gfx"
 fi
 

@@ -1,3 +1,17 @@
+diff --git a/host/NativeSubWindow_stub.cpp b/host/NativeSubWindow_stub.cpp
+index b413a31..4593ba9 100644
+--- a/host/NativeSubWindow_stub.cpp
++++ b/host/NativeSubWindow_stub.cpp
+@@ -14,7 +14,9 @@
+  * limitations under the License.
+  */
+ 
++#if !GFXSTREAM_ENABLE_HOST_GLES
+ #include "GlesCompat.h"
++#endif
+ #include "NativeSubWindow.h"
+ 
+ EGLNativeWindowType createSubWindow(FBNativeWindowType p_window, int x, int y, int width,
 diff --git a/host/backend/meson.build b/host/backend/meson.build
 index b47d2ed..1dc720c 100644
 --- a/host/backend/meson.build
@@ -35,10 +49,23 @@ index e9d9757..1708517 100644
  
  std::unique_ptr<DisplaySurface> EmulationGl::createWindowSurface(
 diff --git a/host/gl/gl-host-common/meson.build b/host/gl/gl-host-common/meson.build
-index d102831..04dc53c 100644
+index d102831..bcb7a46 100644
 --- a/host/gl/gl-host-common/meson.build
 +++ b/host/gl/gl-host-common/meson.build
-@@ -46,6 +46,7 @@ lib_gl_host_common = static_library(
+@@ -32,8 +32,11 @@ files_gl_host_common_qnx = files(
+ # HACK: For the misc.h file already in AEMU host common
+ inc_gl_host_common = include_directories('include')
+ 
+-if host_machine.system() == 'darwin'
++if host_machine.system() == 'darwin' and host_machine.subsystem() == 'macos'
+   files_lib_gl_host_common += files_gl_host_common_darwin
++elif host_machine.system() == 'darwin'
++  # iOS: no IOKit graphics / NSOpenGL; the QNX no-op GPU info works as is.
++  files_lib_gl_host_common += files('opengl/NativeGpuInfo_qnx.cpp')
+ elif host_machine.system() == 'windows'
+   files_lib_gl_host_common += files_gl_host_common_win32
+ elif host_machine.system() == 'linux'
+@@ -46,6 +49,7 @@ lib_gl_host_common = static_library(
    'gl_host_common',
    files_lib_gl_host_common,
    cpp_args: gfxstream_host_args,
@@ -46,6 +73,24 @@ index d102831..04dc53c 100644
    include_directories: [inc_gfxstream_include, inc_include, inc_gl_host_common, inc_host_features],
    dependencies: [aemu_base_dep, aemu_common_dep, aemu_snapshot_dep],
    link_with: [lib_host_features]
+diff --git a/host/gl/glestranslator/EGL/EglGlobalInfo.cpp b/host/gl/glestranslator/EGL/EglGlobalInfo.cpp
+index 167772c..ea7289b 100644
+--- a/host/gl/glestranslator/EGL/EglGlobalInfo.cpp
++++ b/host/gl/glestranslator/EGL/EglGlobalInfo.cpp
+@@ -67,8 +67,12 @@ EglGlobalInfo* EglGlobalInfo::getInstance(bool nullEgl) {
+     return sSingleton(nullEgl);
+ }
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++
+ EglGlobalInfo::EglGlobalInfo(bool nullEgl) {
+-#if defined(ANDROID) || defined(__QNX__)
++#if defined(ANDROID) || defined(__QNX__) || (defined(__APPLE__) && !TARGET_OS_OSX)
+     sEgl2Egl = true;
+     sEgl2EglSyncSafeToUse = true;
+     m_engine = EglOS::
 diff --git a/host/gl/glestranslator/EGL/EglOsApi_egl.cpp b/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
 index 2fca845..b513b0a 100644
 --- a/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
@@ -83,6 +128,87 @@ index 2fca845..b513b0a 100644
      if (!this->function_name) {                                        \
          this->function_name =                                          \
                  reinterpret_cast<return_type(GL_APIENTRY*) signature>( \
+diff --git a/host/gl/glestranslator/EGL/MacNative.h b/host/gl/glestranslator/EGL/MacNative.h
+index ab20905..cae7a84 100644
+--- a/host/gl/glestranslator/EGL/MacNative.h
++++ b/host/gl/glestranslator/EGL/MacNative.h
+@@ -17,7 +17,12 @@
+ #ifndef  MAC_NATIVE_H
+ #define  MAC_NATIVE_H
+ 
++#include <TargetConditionals.h>
++#if TARGET_OS_OSX
+ #include <OpenGL/gl.h>
++#else
++#include <GLES2/gl2.h>  // iOS: only GLenum is needed from here
++#endif
+ 
+ typedef enum {                               // Mac equivalence
+                  MAC_HAS_DOUBLE_BUFFER = 5,  // NSOpenGLPFADoubleBuffer
+diff --git a/host/gl/glestranslator/EGL/MacNative_ios.mm b/host/gl/glestranslator/EGL/MacNative_ios.mm
+new file mode 100644
+index 0000000..c10f749
+--- /dev/null
++++ b/host/gl/glestranslator/EGL/MacNative_ios.mm
+@@ -0,0 +1,33 @@
++// VirtualAndroid: iOS replacements for the few MacNative.h helpers that
++// EglOsApi_egl.cpp (EGL-on-EGL over ANGLE) uses. On iOS there is no
++// NSView/CGL; a native window is a CALayer (ANGLE's Metal backend accepts a
++// CALayer/CAMetalLayer as EGLNativeWindowType).
++#include "MacNative.h"
++
++#import <QuartzCore/QuartzCore.h>
++
++void* nsGetLayer(void* nativeWin) { return nativeWin; }
++
++bool nsGetWinDims(void* win, unsigned int* width, unsigned int* height) {
++    if (!win) return false;
++    CALayer* layer = (__bridge CALayer*)win;
++    CGSize size = layer.bounds.size;
++    CGFloat scale = layer.contentsScale;
++    *width = (unsigned int)(size.width * scale);
++    *height = (unsigned int)(size.height * scale);
++    return true;
++}
++
++bool nsCheckColor(void* win, int colorSize) {
++    (void)win;
++    (void)colorSize;
++    return true;
++}
++
++// Host hardware video decode (VideoToolbox -> CGL textures) is macOS/CGL only.
++void nsConvertVideoFrameToNV12Textures(void* context, void* iosurface, int Ytex, int UVtex) {
++    (void)context;
++    (void)iosurface;
++    (void)Ytex;
++    (void)UVtex;
++}
+diff --git a/host/gl/glestranslator/EGL/meson.build b/host/gl/glestranslator/EGL/meson.build
+index 513aa3b..0e3a1d1 100644
+--- a/host/gl/glestranslator/EGL/meson.build
++++ b/host/gl/glestranslator/EGL/meson.build
+@@ -40,8 +40,11 @@ egl_cpp_args = [
+   '-Wno-inconsistent-missing-override',
+ ]
+ 
+-if host_machine.system() == 'darwin'
++if host_machine.system() == 'darwin' and host_machine.subsystem() == 'macos'
+   files_lib_egl_translator += files_egl_darwin
++elif host_machine.system() == 'darwin'
++  # iOS: no CGL; EGL-on-EGL (ANGLE) only.
++  files_lib_egl_translator += files('MacNative_ios.mm')
+ elif host_machine.system() == 'windows'
+   files_lib_egl_translator += files_egl_win32
+ elif host_machine.system() == 'linux'
+@@ -52,6 +55,7 @@ lib_egl_translator = static_library(
+   'egl_translator',
+   files_lib_egl_translator,
+   cpp_args: egl_cpp_args + gfxstream_host_args,
++  objcpp_args: egl_cpp_args + gfxstream_host_args,
+   include_directories: [inc_gfxstream_include, inc_include, inc_gl_common, inc_apigen_codec,
+                         inc_gl_host_common, inc_stream_servers, inc_etc],
+   link_with: [lib_gl_common, lib_apigen_codec, lib_gl_host_common],
 diff --git a/host/meson.build b/host/meson.build
 index 362af0a..bf25cbd 100644
 --- a/host/meson.build

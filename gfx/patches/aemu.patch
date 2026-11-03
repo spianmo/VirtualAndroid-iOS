@@ -1,0 +1,77 @@
+diff --git a/base/System.cpp b/base/System.cpp
+index bfd4292..024669a 100644
+--- a/base/System.cpp
++++ b/base/System.cpp
+@@ -33,7 +33,7 @@
+ #endif
+ 
+ #ifdef __APPLE__
+-#include <libproc.h>
++#include <mach-o/dyld.h>  // _NSGetExecutablePath (libproc.h is macOS-only)
+ #include <mach/clock.h>
+ #include <mach/mach.h>
+ #endif  // __APPLE__
+@@ -339,8 +339,8 @@ std::string getProgramDirectoryFromPlatform() {
+     }
+ #elif defined(__APPLE__)
+     char s[PATH_MAX];
+-    auto pid = getpid();
+-    proc_pidpath(pid, s, sizeof(s));
++    uint32_t sz = sizeof(s);
++    if (_NSGetExecutablePath(s, &sz) != 0) s[0] = '\0';
+     char* x = ::strrchr(s, '/');
+     if (x) {
+         // skip all slashes - there might be more than one
+diff --git a/base/system-native-mac.mm b/base/system-native-mac.mm
+index 86fa224..9c34da4 100644
+--- a/base/system-native-mac.mm
++++ b/base/system-native-mac.mm
+@@ -17,12 +17,17 @@
+ #include "aemu/base/system/System.h"
+ 
+ #include <CoreFoundation/CoreFoundation.h>
++#include <TargetConditionals.h>
++#if TARGET_OS_OSX
+ #include <IOKit/IOBSD.h>
+ #include <IOKit/IOKitLib.h>
+ #include <AppKit/AppKit.h>
++#endif
+ 
++#if TARGET_OS_OSX
+ #include <IOKit/kext/KextManager.h>
+ #include <IOKit/storage/IOBlockStorageDevice.h>
++#endif
+ 
+ #import <Foundation/Foundation.h>
+ #import <Foundation/NSProcessInfo.h>
+@@ -82,6 +87,10 @@ void cpuUsageCurrentThread_macImpl(
+ }
+ 
+ Optional<DiskKind> nativeDiskKind(int st_dev) {
++#if !TARGET_OS_OSX
++    (void)st_dev;
++    return DiskKind::Ssd;  // iOS: always flash storage, no IOKit access
++#else
+     const char* devName = devname(st_dev, S_IFBLK);
+     if (!devName) {
+         return {};
+@@ -151,16 +160,19 @@ Optional<DiskKind> nativeDiskKind(int st_dev) {
+     IOObjectRelease(entryIterator);
+ 
+     return {};
++#endif  // TARGET_OS_OSX
+ }
+ 
+ // From:
+ // https://stackoverflow.com/questions/6796028/start-a-gui-process-in-mac-os-x-without-dock-icon
+ void hideDockIcon_macImpl(void) {
++#if TARGET_OS_OSX
+     if (NSApp == nil) {
+         // Initialize the global variable "NSApp"
+         [NSApplication sharedApplication];
+     }
+     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
++#endif
+ 
+ }
+ 
