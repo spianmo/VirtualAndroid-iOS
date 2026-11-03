@@ -19,8 +19,12 @@ $S/build_qemu.sh -p ios           -b tcti -s engine/qemu-ios   # no JIT
 $S/build_qemu.sh -p ios_simulator -b tcti -s engine/qemu-ios   # optional: TCTI in the simulator
 # 3. xcframeworks (device slice = tcti, simulator slice = tcg by default)
 $S/make_xcframeworks.sh [--sim-backend tcg|tcti] [--device-backend tcti|tcg]
-# 4. headless boot test in the simulator (no app)
-$S/run_sim.sh -b tcg --fresh --until zygote          # --machine ranchu, --timeout SECS
+# 4. headless boot test in the simulator (no app); default machine ranchu with
+#    va-vsock-pci adb bridge and gfx/build-ios-sim/dist libva_gfx
+$S/run_sim.sh -b tcg --fresh --keep --screenshot-dir engine/build-ios/run/shots
+adb connect 127.0.0.1:5590 && adb -s 127.0.0.1:5590 shell getprop sys.boot_completed
+print quit | nc -U engine/build-ios/run/sim-tcg/monitor.sock      # stop (--keep)
+#    --machine virt, --gfx-lib PATH|none, --until zygote, --timeout SECS, --adb-port N
 ```
 
 `-s` picks the QEMU tree (default `engine/qemu`). Prefer `engine/qemu-ios`
@@ -48,11 +52,21 @@ removed from PATH and pkg-config only sees the platform sysroot.
 | `xcframeworks/*.xcframework` | what the app embeds; `qemu-backends.txt` says which backend each QEMU slice is |
 | `run/<name>/` | run_sim.sh state: disks, `serial.log`, `logcat.log`, `qemu.out`, `milestones.txt` |
 
-The app must embed (Embed & Sign) exactly these 11 xcframeworks, which is
-QEMU's transitive closure: `qemu-aarch64-softmmu`, `glib-2.0.0`, `gio-2.0.0`,
+## What the app embeds
+
+Embed & Sign these 11 xcframeworks from `engine/build-ios/xcframeworks` (QEMU's
+transitive closure): `qemu-aarch64-softmmu`, `glib-2.0.0`, `gio-2.0.0`,
 `gobject-2.0.0`, `gmodule-2.0.0`, `intl.8`, `iconv.2`, `ffi.8`, `pixman-1.0`,
-`zstd.1`, `slirp.0`. Install names are `@rpath/<name>.framework/<name>`, so the
-app needs `@executable_path/Frameworks` in its runpath (Xcode default).
+`zstd.1`, `slirp.0`; plus gfx's `va_gfx`, `GLESv2` (ANGLE) and optionally
+`MoltenVK` from `gfx/build-ios-xcframeworks` (app/scripts/embed_engine_frameworks.sh
+already embeds both directories). Install names are
+`@rpath/<name>.framework/<name>`, so the app needs `@executable_path/Frameworks`
+in its runpath (Xcode default). QEMU does not link va_gfx: ranchu `dlopen`s it
+from `-M ranchu,gfx-lib=PATH`, else `$VA_GFX_LIB`, else
+`<dir of main executable>/Frameworks/va_gfx.framework/va_gfx` (the app bundle
+layout), and va_gfx finds ANGLE at `../GLESv2.framework/GLESv2` next to itself.
+(The app currently sets `VA_GFX_LIBRARY`, which QEMU does not read; the bundle
+lookup makes it unnecessary.)
 libucontext, libfdt and pcre2 are linked statically. No firmware blobs are
 installed (`-kernel` boot needs none).
 
@@ -82,7 +96,20 @@ don't rely on a return value). Pattern (tools/va_qemu_launch.c, as UTM
 5. Stop the VM with the QMP/HMP `quit` command (or `system_powerdown`); verified: `qemu_main_loop` returns 0 and `qemu_cleanup` completes.
 6. Treat the library as one VM per process: QEMU's globals are not reinitialisable after `qemu_cleanup`, and frameworks are not reliably unloadable.
 
-Arguments: same as tools/run-macos.sh with `-accel tcg,thread=multi,tb-size=N -cpu cortex-a76`.
+Arguments: same as `tools/run-macos.sh --machine ranchu` with
+`-accel tcg,thread=multi,tb-size=N -cpu cortex-a76` (see run_sim.sh), in particular:
+
+* `-M ranchu[,gfx-lib=PATH|,gfx=off]`
+* `-device va-vsock-pci,guest-cid=77,adb-port=PORT,pipe-port=5000`: the guest's
+  adbd and the pipe-port services (clipboard ...) talk vsock now, so without it
+  there is no adb; slirp `hostfwd` for 5555 is not needed on ranchu.
+  `adb-port` listens on 127.0.0.1 inside the app process (in the simulator that
+  is the Mac's loopback).
+* bootconfig `androidboot.qemu.adb.pubkey=<~/.android/adbkey.pub>` (tools/make_initrd.py
+  extra arg) so adbd accepts the host without a prompt (dev builds).
+* Frames: install `va_host_set_present_callback()` before `qemu_init`; without
+  it, `VA_DUMP_FRAMES=<dir>` (dev only) writes `frame-N.png`/`latest.png`.
+
 Paths (disks, `-serial file:`, unix sockets) must be inside the app container;
 unix socket paths must stay under 104 bytes.
 
@@ -113,9 +140,37 @@ unix socket paths must stay under 104 bytes.
 
 * `configure`: emit `needs_exe_wrapper = true` for TARGET_OS_IPHONE targets
   (meson otherwise thinks iOS binaries run on the macOS build host).
-* `system/meson.build`: export `va_host_*` / `va_engine_*` from the darwin shared lib.
+* `system/meson.build`: export `va_host_*` / `va_engine_*` from the darwin shared lib
+  (covers every function of host/include/va_host.h incl. `va_host_set_present_callback`).
 
 ## Boot results (iOS 26.1 simulator, iPhone 17 Pro, M2 Max, headless)
+
+### `-M ranchu` + libva_gfx (ANGLE Metal), TCG JIT, engine/qemu master 7bd3884a5
+
+`run_sim.sh -b tcg --keep --screenshot-dir ...`, host load ~10:
+
+| milestone | host s | guest s |
+|---|---|---|
+| `Run /init` | 3.1 | 1.2 |
+| `init second stage started` | 7.2 | 5.3 |
+| `starting service 'zygote'` | 66.8 | 65.2 |
+| `starting service 'surfaceflinger'` | 69.9 | 68.5 |
+| `starting service 'bootanim'` | 75.0 | 73.6 |
+| bootanim exits / `sys.boot_completed=1` | 156.9 | 155.0 |
+
+Renderer: `ANGLE Metal Renderer: Apple iOS simulator GPU`, guest GLES 3.0,
+zero-copy IOSurface frames; `first guest frame 1080x2340`; frame dumps show the
+boot animation and then the Launcher3 home screen (a "System UI isn't
+responding" dialog appears once under TCG, HOME dismisses it).
+`adb connect 127.0.0.1:5590` from macOS works: `getprop sys.boot_completed` = 1,
+focus `com.android.launcher3/.uioverrides.QuickstepLauncher`. All pipe services
+the guest opens are found (opengles, GLProcessPipe, refcount, qemud
+boot-properties/gps/sensors/camera/fingerprintlisten, clipboard, QemuMiscPipe).
+Known: after `quit`, `qemu_cleanup` completes but the process then aborts in a
+va_gfx worker thread (`ProcessCleanupThread` -> `~ShaderParser` heap checksum)
+during `exit()`; reported to gfx.
+
+### earlier, before the ranchu board (`-M virt`, no graphics)
 
 `run_sim.sh --fresh --until surfaceflinger`, `-smp 4 -m 2048 -cpu cortex-a76
 -accel tcg,thread=multi,tb-size=1024`, host load ~10 (other agents building).
