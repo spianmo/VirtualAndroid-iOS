@@ -297,6 +297,7 @@ enum {
     OP_rcMakeCurrent = 10017,
     OP_rcFBPost = 10018,
     OP_rcUpdateColorBuffer = 10024,
+    OP_rcCompose = 10037,
     OP_glClear = 2063,
     OP_glClearColor = 2064,
     OP_glDisable = 2086,
@@ -458,6 +459,26 @@ static int near(const uint8_t a[4], int r, int g, int b)
 {
     return abs(a[0] - r) <= 3 && abs(a[1] - g) <= 3 && abs(a[2] - b) <= 3;
 }
+
+/* hwcomposer host composition request (gfxstream Hwc2.h / guest EmuHWC2.h) */
+typedef struct {
+    uint32_t cbHandle;
+    uint32_t composeMode; /* 2 = DEVICE (texture), 3 = SOLID_COLOR */
+    int32_t displayFrame[4]; /* left, top, right, bottom */
+    float crop[4];
+    int32_t blendMode; /* 1 = NONE, 2 = PREMULTIPLIED */
+    float alpha;
+    uint8_t color[4];
+    uint32_t transform;
+} ComposeLayer;
+typedef struct {
+    uint32_t version; /* 2 */
+    uint32_t displayId;
+    uint32_t targetHandle;
+    uint32_t numLayers;
+    ComposeLayer layer[2];
+} ComposeDeviceV2;
+_Static_assert(sizeof(ComposeLayer) == 56, "ComposeLayer layout");
 
 /* ------------------------------------------------------------------ */
 
@@ -650,6 +671,48 @@ int main(int argc, char **argv)
         CHECK(near(tr, 0, 255, 0), "top-right should be green");
         CHECK(near(tl, 26, 51, 153), "top-left should be the clear color");
         CFRelease(f2);
+    }
+    bql_lock();
+
+    /* --- Frame 3: hwcomposer host composition (rcCompose, what EmuHWC2 uses) --- */
+    {
+        uint32_t target = rcN(gl, OP_rcCreateColorBuffer, 1, 3, W, H, 0x1908);
+        ComposeDeviceV2 dev;
+        memset(&dev, 0, sizeof(dev));
+        dev.version = 2;
+        dev.displayId = 0;
+        dev.targetHandle = target;
+        dev.numLayers = 2;
+        dev.layer[0] = (ComposeLayer){ .cbHandle = cb1, .composeMode = 2,
+                                       .displayFrame = { 0, 0, W, H },
+                                       .crop = { 0, 0, W, H }, .blendMode = 1, .alpha = 1.0f };
+        dev.layer[1] = (ComposeLayer){ .cbHandle = 0, .composeMode = 3,
+                                       .displayFrame = { W / 4, H / 4, W * 3 / 4, H * 3 / 4 },
+                                       .crop = { 0, 0, 0, 0 }, .blendMode = 1, .alpha = 1.0f,
+                                       .color = { 255, 255, 0, 255 } };
+        Packet pk = pk_begin(OP_rcCompose);
+        pk_u32(&pk, sizeof(dev));
+        pk_u32(&pk, sizeof(dev));
+        pk_bytes(&pk, &dev, sizeof(dev));
+        pk_send(gl, &pk);
+        int r = (int)read_u32(gl);
+        printf("rcCompose = %d\n", r);
+        CHECK(r == 0 || r == 1, "rcCompose = %d", r);
+    }
+    bql_unlock();
+    IOSurfaceRef f3 = wait_frame(3);
+    CHECK(f3, "no frame after rcCompose");
+    if (f3) {
+        snprintf(path, sizeof(path), "%s/va_gfx_frame3_compose_%s.png", argv[2], backend);
+        write_png(f3, path);
+        uint8_t c[4], tl[4];
+        pixel_at(f3, W / 2, H / 2, c);
+        pixel_at(f3, 0, 0, tl);
+        printf("frame3 pixels: center rgba(%d,%d,%d) top-left rgba(%d,%d,%d)\n", c[0], c[1], c[2],
+               tl[0], tl[1], tl[2]);
+        CHECK(near(c, 255, 255, 0), "center should be the yellow solid-color layer");
+        CHECK(near(tl, 0, 0, 128), "top-left should be the gradient layer");
+        CFRelease(f3);
     }
     bql_lock();
 
