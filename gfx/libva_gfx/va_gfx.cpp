@@ -14,10 +14,17 @@
 //    BQL <-> RenderChannel lock inversion.
 //  * sync_timeline_inc is called directly from gfxstream's SyncThread (no
 //    BQL), as allowed by engine/qemu's goldfish_sync.h.
+//
+// Lifetime: nothing in this library runs from static destructors. All global
+// state is heap-allocated and intentionally leaked, so a process that exits
+// without va_gfx_teardown() (e.g. QEMU on SIGTERM) never joins renderer
+// threads. va_gfx_teardown() is the only orderly shutdown; it is idempotent,
+// bounded in time and safe to call with the BQL held.
 
 #include "va_gfx_internal.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -78,9 +85,14 @@ struct State {
     int glesMinor = 0;
     bool initialized = false;
     bool servicesRegistered = false;
+    bool readbackRegistered = false;
+    // Set by va_gfx_teardown(): no new pipes, no engine calls from our threads.
+    std::atomic<bool> shutdown{false};
+    std::atomic<bool> teardownStarted{false};
 };
 
-State g;
+// Never destroyed (see "Lifetime" above).
+State& g = *new State;
 
 // >0 while this thread is inside an engine -> libva_gfx callback (BQL held).
 thread_local int t_inEngineCallback = 0;
@@ -111,13 +123,17 @@ public:
         mThread = std::thread([this] { run(); });
     }
 
+    // Never joins: the waker may be blocked in bql_lock() while our caller
+    // (va_gfx_teardown on the main thread) holds the BQL. Once it gets the
+    // BQL it sees g.shutdown, drops its batch and exits.
     void stop() {
         {
             std::lock_guard<std::mutex> lock(mLock);
             mQuit = true;
+            mQueue.clear();
         }
         mCv.notify_all();
-        if (mThread.joinable()) mThread.join();
+        if (mThread.joinable()) mThread.detach();
     }
 
     void push(const DeferredOp& op) {
@@ -149,7 +165,7 @@ private:
             {
                 std::unique_lock<std::mutex> lock(mLock);
                 mCv.wait(lock, [this] { return mQuit || !mQueue.empty(); });
-                if (mQuit && mQueue.empty()) return;
+                if (mQuit) return;
             }
             // Take the BQL *before* dequeuing so a concurrent guest close
             // (which runs under the BQL) either sees these ops still queued
@@ -159,7 +175,9 @@ private:
                 std::lock_guard<std::mutex> lock(mLock);
                 batch.swap(mQueue);
             }
-            for (const auto& op : batch) performOp(op);
+            if (!g.shutdown.load()) {
+                for (const auto& op : batch) performOp(op);
+            }
             batch.clear();
             if (g.engine.bql_unlock) g.engine.bql_unlock();
         }
@@ -199,6 +217,7 @@ namespace {
 std::atomic<int> sNextPipeId{1};
 
 void performOp(const DeferredOp& op) {
+    if (g.shutdown.load()) return;
     switch (op.kind) {
         case DeferredOp::kWake:
             if (!op.pipe->hostClosed && g.engine.pipe_host_signal_wake) {
@@ -246,6 +265,10 @@ const AndroidPipeHwFuncs kHwFuncs = {
 
 extern "C" VaGfxPipe* vagfx_pipe_open(void* hwpipe, const char* service, const char* args) {
     EngineCallbackScope scope;
+    if (g.shutdown.load()) {
+        VLOG("guest opened '%s' after va_gfx_teardown(); refusing", service);
+        return nullptr;
+    }
     if (!g.renderer) {
         VLOG("guest opened '%s' before the renderer exists", service);
         return nullptr;
@@ -323,6 +346,7 @@ void syncTimelineInc(uint64_t timeline, uint32_t count) {
     // engine/qemu goldfish_sync_timeline_inc() only queues and may be called
     // from any thread with or without the BQL (hw/android/goldfish_sync.h),
     // so signal fences directly from gfxstream's SyncThread: lowest latency.
+    if (g.shutdown.load()) return;
     if (g.engine.sync_timeline_inc) g.engine.sync_timeline_inc(timeline, count);
 }
 
@@ -331,6 +355,8 @@ void syncDestroyTimeline(uint64_t timeline) {
 }
 
 void syncRegisterTriggerWait(emugl_sync_trigger_wait_t fn) {
+    // Render threads re-register on every rcCreateSyncKHR; ignore after teardown.
+    if (g.shutdown.load()) return;
     if (g.engine.sync_register_trigger_wait) g.engine.sync_register_trigger_wait(fn);
 }
 
@@ -342,8 +368,10 @@ bool syncDeviceExists() {
 // Emulator "agents" (headless implementations)
 // ---------------------------------------------------------------------------
 
-std::mutex sDisplayLock;
-std::map<uint32_t, android::MultiDisplayInfo> sDisplays;
+// Leaked on purpose: render threads may use them during process exit.
+std::mutex& sDisplayLock = *new std::mutex;
+std::map<uint32_t, android::MultiDisplayInfo>& sDisplays =
+    *new std::map<uint32_t, android::MultiDisplayInfo>;
 
 QAndroidMultiDisplayAgent sMultiDisplayAgent;
 QAndroidEmulatorWindowAgent sWindowAgent;
@@ -706,6 +734,10 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_init(const VaGfxCon
                                                                   VaGfxPresentFn present,
                                                                   void* opaque) {
     if (g.initialized) return 0;
+    if (g.teardownStarted.load()) {
+        VLOG("va_gfx_init after va_gfx_teardown() is not supported in the same process");
+        return -1;
+    }
     if (!config || !engine || !engine->pipe_add_type) return -1;
 
     g.cfg = *config;
@@ -808,6 +840,7 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_init(const VaGfxCon
     }
     if (!zeroCopy) {
         g.renderer->setPostCallback(onPost, nullptr, true /* BGRA readback */, 0);
+        g.readbackRegistered = true;
     }
     VLOG("frame delivery: %s", zeroCopy ? "zero-copy IOSurface blit" : "readback");
 
@@ -820,8 +853,12 @@ extern "C" void vagfx_request_readback_fallback(void) {
     if (requested.exchange(true)) return;
     // Called from inside a post (FrameBuffer lock held): switch on another thread.
     std::thread([] {
+        if (g.shutdown.load()) return;
         vagfx_present_gl_disable();
-        if (g.renderer) g.renderer->setPostCallback(onPost, nullptr, true, 0);
+        if (g.renderer) {
+            g.renderer->setPostCallback(onPost, nullptr, true, 0);
+            g.readbackRegistered = true;
+        }
         VLOG("frame delivery: fell back to readback");
     }).detach();
 }
@@ -845,17 +882,55 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_get_gles_version(in
 }
 
 extern "C" __attribute__((visibility("default"))) void va_gfx_teardown(void) {
-    if (!g.initialized) return;
-    vagfx_present_gl_disable();
-    if (g.renderer) {
-        g.renderer->setPostCallback(nullptr, nullptr, false, 0);
-        g.renderer->finish();
-        g.renderer->stop(true);
+    // Idempotent; also a no-op if va_gfx_init never succeeded.
+    if (!g.initialized || g.teardownStarted.exchange(true)) return;
+
+    // 1. Synchronous and non-blocking (safe with the BQL held): stop talking
+    //    to the engine and the embedder.
+    g.shutdown.store(true);
+    vagfx_present_disable();  // no new VaGfxPresentFn calls
+    if (g.engine.sync_register_trigger_wait) {
+        g.engine.sync_register_trigger_wait(nullptr);  // device signals fences itself
     }
-    waker().stop();
-    vagfx_present_teardown();
-    g.renderer.reset();
-    gfxstream::RendererPtr none;
-    android_setOpenglesRenderer(&none);
-    g.initialized = false;
+    waker().stop();  // never joins
+
+    // 2. Everything that waits on renderer threads runs on a helper thread;
+    //    we wait for it with a deadline, so teardown cannot hang (the helper
+    //    and any stuck renderer threads are leaked on timeout).
+    gfxstream::RendererPtr renderer = std::move(g.renderer);
+    {
+        gfxstream::RendererPtr none;
+        android_setOpenglesRenderer(&none);  // under the caller's BQL, like pipe callbacks
+    }
+    struct Job {
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false;
+    };
+    auto job = std::make_shared<Job>();
+    const bool readback = g.readbackRegistered;
+    std::thread([job, readback, renderer = std::move(renderer)]() mutable {
+        pthread_setname_np("va-gfx-teardown");
+        vagfx_present_gl_disable();  // waits for an in-flight zero-copy post
+        if (renderer) {
+            if (readback) renderer->setPostCallback(nullptr, nullptr, false, 0);
+            // Closes every render channel from the host side (render threads
+            // leave their loops), then joins them and the cleanup thread.
+            renderer->stop(true);
+        }
+        vagfx_present_teardown();
+        renderer.reset();  // ~RendererImpl: RenderWindow, FrameBuffer, post/sync threads
+        {
+            std::lock_guard<std::mutex> lock(job->m);
+            job->done = true;
+        }
+        job->cv.notify_all();
+    }).detach();
+
+    long timeoutMs = 3000;
+    if (const char* t = getenv("VA_GFX_TEARDOWN_TIMEOUT_MS")) timeoutMs = atol(t);
+    std::unique_lock<std::mutex> lock(job->m);
+    const bool done = job->cv.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                                       [&] { return job->done; });
+    VLOG("teardown %s", done ? "complete" : "timed out; leaving renderer threads behind");
 }

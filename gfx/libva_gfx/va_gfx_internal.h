@@ -42,6 +42,8 @@ void *vagfx_present_acquire(int width, int height, uint64_t *generation);
 void vagfx_present_submit(void *iosurface, int width, int height);
 /* The surface's current retain count is its idle level (e.g. ANGLE retains it). */
 void vagfx_present_mark_idle(void *iosurface);
+/* Stop calling VaGfxPresentFn (non-blocking; in-flight calls may finish). */
+void vagfx_present_disable(void);
 void vagfx_present_teardown(void);
 
 /* Implemented in va_gfx_present_gl.cpp (ANGLE zero-copy presentation). */

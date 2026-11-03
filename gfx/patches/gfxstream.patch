@@ -88,6 +88,35 @@ index b413a31..4593ba9 100644
  #include "NativeSubWindow.h"
  
  EGLNativeWindowType createSubWindow(FBNativeWindowType p_window, int x, int y, int width,
+diff --git a/host/RenderThread.cpp b/host/RenderThread.cpp
+index 5207b1c..0448f07 100644
+--- a/host/RenderThread.cpp
++++ b/host/RenderThread.cpp
+@@ -80,7 +80,8 @@ static constexpr int kStreamBufferSize = 128 * 1024;
+ static constexpr int kMinThreadsToRunUnlimited = 5;
+ 
+ // A thread run limiter that limits render threads to run one slice at a time.
+-static android::base::Lock sThreadRunLimiter;
++// VirtualAndroid: leaked on purpose (used by render threads during process exit).
++static android::base::Lock& sThreadRunLimiter = *new android::base::Lock;
+ 
+ RenderThread::RenderThread(RenderChannelImpl* channel,
+                            android::base::Stream* loadStream,
+diff --git a/host/RenderThreadInfo.cpp b/host/RenderThreadInfo.cpp
+index f95eeb0..a982cf2 100644
+--- a/host/RenderThreadInfo.cpp
++++ b/host/RenderThreadInfo.cpp
+@@ -35,7 +35,9 @@ struct RenderThreadRegistry {
+     std::unordered_set<RenderThreadInfo*> threadInfos;
+ };
+ 
+-static RenderThreadRegistry sRegistry;
++// VirtualAndroid: leaked on purpose. Render threads may still exit while the
++// process runs static destructors; a destroyed registry makes them spin.
++static RenderThreadRegistry& sRegistry = *new RenderThreadRegistry;
+ 
+ RenderThreadInfo::RenderThreadInfo() {
+     s_threadInfoPtr = this;
 diff --git a/host/backend/meson.build b/host/backend/meson.build
 index b47d2ed..1dc720c 100644
 --- a/host/backend/meson.build
@@ -149,6 +178,20 @@ index d102831..bcb7a46 100644
    include_directories: [inc_gfxstream_include, inc_include, inc_gl_host_common, inc_host_features],
    dependencies: [aemu_base_dep, aemu_common_dep, aemu_snapshot_dep],
    link_with: [lib_host_features]
+diff --git a/host/gl/gl-host-common/opengl/GLProcessPipe.cpp b/host/gl/gl-host-common/opengl/GLProcessPipe.cpp
+index a2c82d3..225f11d 100644
+--- a/host/gl/gl-host-common/opengl/GLProcessPipe.cpp
++++ b/host/gl/gl-host-common/opengl/GLProcessPipe.cpp
+@@ -34,7 +34,8 @@ struct ProcessPipeIdRegistry {
+     std::unordered_set<uint64_t> ids;
+ };
+ 
+-static ProcessPipeIdRegistry sRegistry;
++// VirtualAndroid: leaked on purpose (pipe close may race with process exit).
++static ProcessPipeIdRegistry& sRegistry = *new ProcessPipeIdRegistry;
+ 
+ static bool sIdExistsInRegistry(uint64_t id) {
+     AutoLock lock(sRegistry.lock);
 diff --git a/host/gl/glestranslator/EGL/EglGlobalInfo.cpp b/host/gl/glestranslator/EGL/EglGlobalInfo.cpp
 index 167772c..ea7289b 100644
 --- a/host/gl/glestranslator/EGL/EglGlobalInfo.cpp
@@ -336,6 +379,20 @@ index f79a06d..049f445 100644
              res.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
          }
  #endif
+diff --git a/host/vulkan/VulkanBoxedHandles.cpp b/host/vulkan/VulkanBoxedHandles.cpp
+index 9ff8b47..902a4f9 100644
+--- a/host/vulkan/VulkanBoxedHandles.cpp
++++ b/host/vulkan/VulkanBoxedHandles.cpp
+@@ -45,7 +45,8 @@ struct ReadStreamRegistry {
+     }
+ };
+ 
+-static ReadStreamRegistry sReadStreamRegistry;
++// VirtualAndroid: leaked on purpose (used by render threads during process exit).
++static ReadStreamRegistry& sReadStreamRegistry = *new ReadStreamRegistry;
+ 
+ }  // namespace
+ 
 diff --git a/meson.build b/meson.build
 index 3ea2e7a..faa8ec1 100644
 --- a/meson.build

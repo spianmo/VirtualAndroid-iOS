@@ -827,19 +827,49 @@ int main(int argc, char **argv)
     }
     bql_lock();
 
-    /* --- tear down the guest connections --- */
-    if (ref) guest_close(ref);
-    guest_close(gl);
-    if (proc) guest_close(proc);
-    bql_unlock();
-
     CHECK(s_engine_calls_without_bql == 0, "%d engine calls without the BQL",
           s_engine_calls_without_bql);
     CHECK(s_present_with_bql == 0, "present called with the BQL held");
     printf("goldfish sync: trigger_wait %s, timeline_inc calls %d\n",
            s_trigger_wait ? "registered" : "not registered", s_timeline_incs);
 
-    p_va_gfx_teardown();
+    /*
+     * Shutdown paths (HARNESS_EXIT):
+     *   (unset)       board's order: close the pipes, then va_gfx_teardown() on the
+     *                 "main thread" with the BQL held, twice (idempotent), then exit()
+     *   live          exit() with open pipes and live render threads, no teardown
+     *                 (QEMU SIGTERM without a shutdown handler)
+     *   live-busy     like live, but with queued GL work and posts in flight
+ *   teardown-open va_gfx_teardown() with the pipes still open, then exit()
+     */
+    const char *exit_mode = getenv("HARNESS_EXIT") ? getenv("HARNESS_EXIT") : "";
     printf("%s (%d failures)\n", failures ? "HARNESS FAILED" : "HARNESS PASSED", failures);
-    return failures ? 1 : 0;
+    if (!strcmp(exit_mode, "live-busy")) {
+        /* queue lots of GL work + posts, then exit while the render thread is busy */
+        for (int i = 0; i < 300; i++) {
+            gl_clear_color(gl, (float)(i % 10) / 10, 0.2f, 0.3f, 1.0f);
+            rcN(gl, OP_glClear, 0, 1, 0x4000);
+            rcN(gl, OP_rcFBPost, 0, 1, cb2);
+        }
+        printf("exit: calling exit() while the render thread is busy\n");
+        exit(failures ? 1 : 0);
+    }
+    if (!strcmp(exit_mode, "live")) {
+        printf("exit: calling exit() with live render threads and open pipes\n");
+        exit(failures ? 1 : 0); /* BQL still held, like QEMU's main thread */
+    }
+    if (strcmp(exit_mode, "teardown-open") != 0) {
+        if (ref) guest_close(ref);
+        guest_close(gl);
+        if (proc) guest_close(proc);
+    }
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    p_va_gfx_teardown(); /* BQL held */
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    p_va_gfx_teardown(); /* idempotent */
+    printf("exit: va_gfx_teardown (%s) took %.1f ms\n",
+           exit_mode[0] ? exit_mode : "pipes closed",
+           (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
+    exit(failures ? 1 : 0); /* BQL still held */
 }

@@ -93,7 +93,8 @@ struct Entry {
     GLuint fbo = 0;
 };
 
-std::mutex sLock;
+// Leaked on purpose (renderer threads may post during process exit).
+std::mutex& sLock = *new std::mutex;
 Fns f;
 bool sResolved = false;
 bool sFailed = false;
@@ -101,7 +102,7 @@ EGLConfig sConfig = nullptr;
 GLenum sTexTarget = GL_TEXTURE_2D;
 GLuint sReadFbo = 0;
 uint64_t sGeneration = ~0ull;
-std::map<IOSurfaceRef, Entry> sEntries;
+std::map<IOSurfaceRef, Entry>& sEntries = *new std::map<IOSurfaceRef, Entry>;
 EGLDisplay sDisplay = nullptr;
 
 template <typename T>

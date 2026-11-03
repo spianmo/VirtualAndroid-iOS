@@ -14,6 +14,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOSurface/IOSurfaceRef.h>
 
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -22,15 +23,18 @@ namespace {
 
 constexpr size_t kMaxSurfaces = 6;
 
-std::mutex sLock;
+// Containers and locks are heap-allocated and never destroyed: renderer
+// threads may still post while the process runs static destructors.
+std::mutex& sLock = *new std::mutex;
+std::atomic<bool> sDisabled{false};  // set by vagfx_present_disable(); never blocks
 VaGfxPresentFn sFn = nullptr;
 void* sOpaque = nullptr;
-std::vector<IOSurfaceRef> sPool;
+std::vector<IOSurfaceRef>& sPool = *new std::vector<IOSurfaceRef>;
 // Retain count / use count of each pooled surface when the embedder does not
 // hold it. Sampled right before each hand-off, because the GPU path (ANGLE /
 // Metal) takes its own references lazily.
-std::vector<CFIndex> sIdleRetain;
-std::vector<int32_t> sIdleUse;
+std::vector<CFIndex>& sIdleRetain = *new std::vector<CFIndex>;
+std::vector<int32_t>& sIdleUse = *new std::vector<int32_t>;
 size_t sNext = 0;
 uint64_t sGeneration = 0;
 int sWidth = 0;
@@ -124,8 +128,9 @@ extern "C" void vagfx_present_init(int width, int height, VaGfxPresentFn fn, voi
 }
 
 extern "C" void vagfx_present_frame(int width, int height, int ydir, const unsigned char* bgra) {
+    if (sDisabled.load()) return;
     std::lock_guard<std::mutex> lock(sLock);
-    if (!sFn || !bgra || width <= 0 || height <= 0) return;
+    if (sDisabled.load() || !sFn || !bgra || width <= 0 || height <= 0) return;
     IOSurfaceRef s = acquireLocked(width, height);
     if (!s) return;
 
@@ -158,8 +163,9 @@ extern "C" void vagfx_present_frame(int width, int height, int ydir, const unsig
 }
 
 extern "C" void* vagfx_present_acquire(int width, int height, uint64_t* generation) {
+    if (sDisabled.load()) return nullptr;
     std::lock_guard<std::mutex> lock(sLock);
-    if (!sFn || width <= 0 || height <= 0) return nullptr;
+    if (sDisabled.load() || !sFn || width <= 0 || height <= 0) return nullptr;
     IOSurfaceRef s = acquireLocked(width, height);
     if (generation) *generation = sGeneration;
     return (void*)s;
@@ -171,8 +177,9 @@ extern "C" void vagfx_present_mark_idle(void* iosurface) {
 }
 
 extern "C" void vagfx_present_submit(void* iosurface, int width, int height) {
+    if (sDisabled.load()) return;
     std::lock_guard<std::mutex> lock(sLock);
-    if (!sFn || !iosurface) return;
+    if (sDisabled.load() || !sFn || !iosurface) return;
     sampleIdleLocked((IOSurfaceRef)iosurface);
     VaGfxFrame frame;
     frame.iosurface = iosurface;
@@ -182,6 +189,8 @@ extern "C" void vagfx_present_submit(void* iosurface, int width, int height) {
     frame.frame_number = ++sFrameNumber;
     sFn(sOpaque, &frame);
 }
+
+extern "C" void vagfx_present_disable(void) { sDisabled.store(true); }
 
 extern "C" void vagfx_present_teardown(void) {
     std::lock_guard<std::mutex> lock(sLock);

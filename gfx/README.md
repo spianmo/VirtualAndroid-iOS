@@ -175,12 +175,26 @@ androidboot.qemu.vsync=<refresh_hz>
   6 surfaces and never reuses one that is retained elsewhere or
   `IOSurfaceIsInUse`; if all are held the frame is dropped. Do not block.
 
-### 6. Teardown
+### 6. Teardown and process exit
 
-`va_gfx_teardown()` after the vCPUs are stopped (it stops the render threads
-and the waker; the pipes should be closed by then). Snapshot save/load of these
-pipes is not implemented yet (`save`/`load` are NULL, so the engine closes them
-on load; the guest reconnects).
+* `va_gfx_teardown()`: call it from the shutdown handler after closing the
+  pipes. It is idempotent, safe on the QEMU main thread with the BQL held, and
+  cannot hang: it stops engine/embedder callbacks synchronously (no new pipes,
+  no wakes, `sync_register_trigger_wait(NULL)`, no more `present` calls), then
+  stops the renderer on a helper thread (host-side close of every render
+  channel, join of render/cleanup threads, renderer destruction) and waits at
+  most `VA_GFX_TEARDOWN_TIMEOUT_MS` (default 3000 ms). On timeout it returns and
+  leaks the stuck threads. `va_gfx_init()` cannot be called again afterwards.
+  Measured: ~15-35 ms (macOS and iOS simulator).
+* Without teardown (e.g. SIGTERM straight to `exit()`): nothing in libva_gfx
+  runs from static destructors (all state is leaked heap memory), and the
+  gfxstream registries render threads touch are leaked singletons, so exit
+  never joins renderer threads.
+* Tested by `tests/run-exit-tests.sh <macos|ios-sim> [udid]`: pipes closed then
+  teardown, exit() with live render threads, exit() while the render thread is
+  busy, and teardown with pipes still open. Each run has a 30 s hang watchdog.
+* Snapshot save/load of these pipes is not implemented yet (`save`/`load` are
+  NULL, so the engine closes them on load; the guest reconnects).
 
 ## Implementation notes
 
