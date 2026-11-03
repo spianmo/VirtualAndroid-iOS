@@ -28,11 +28,98 @@ index 51edfe4..ee876bb 100644
      bool glOpBlitFromCurrentReadBuffer();
      bool glOpBindToTexture();
      bool glOpBindToTexture2();
+diff --git a/host/ExitGate.h b/host/ExitGate.h
+new file mode 100644
+index 0000000..46ed117
+--- /dev/null
++++ b/host/ExitGate.h
+@@ -0,0 +1,64 @@
++// VirtualAndroid: process-exit gate for gfxstream worker threads.
++//
++// Embedders that host gfxstream in a long-lived process (QEMU, an iOS app)
++// may exit() while render/cleanup/sync threads are still busy. exit() then
++// runs the static destructors of ANGLE and of this library concurrently with
++// those threads, which corrupts the heap. The embedder calls freeze() from an
++// atexit handler that runs before those destructors: from then on every
++// thread parks at its next unit of work, and freeze() waits (bounded) for the
++// units already in flight to finish.
++#pragma once
++
++#include <atomic>
++#include <chrono>
++#include <thread>
++
++namespace gfxstream {
++namespace exit_gate {
++
++inline std::atomic<bool> gFrozen{false};
++inline std::atomic<int> gBusy{0};
++
++[[noreturn]] inline void park() {
++    for (;;) std::this_thread::sleep_for(std::chrono::hours(1));
++}
++
++// Wrap one unit of work (a decoded batch, a cleanup item, a sync command).
++// Never nest scopes on one thread.
++class Scope {
++  public:
++    Scope() {
++        gBusy.fetch_add(1);
++        if (gFrozen.load()) {
++            gBusy.fetch_sub(1);
++            park();
++        }
++    }
++    ~Scope() { gBusy.fetch_sub(1); }
++    Scope(const Scope&) = delete;
++    Scope& operator=(const Scope&) = delete;
++};
++
++// For polling loops inside a Scope: once frozen, leave the busy count and park.
++inline void yieldPoint() {
++    if (gFrozen.load()) {
++        gBusy.fetch_sub(1);
++        park();
++    }
++}
++
++// Returns how many units were in flight when frozen; *drained tells whether
++// they all finished within timeoutMs.
++inline int freeze(int timeoutMs, bool* drained) {
++    gFrozen.store(true);
++    const int busy = gBusy.load();
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
++    while (gBusy.load() > 0 && std::chrono::steady_clock::now() < deadline) {
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++    if (drained) *drained = gBusy.load() == 0;
++    return busy;
++}
++
++}  // namespace exit_gate
++}  // namespace gfxstream
 diff --git a/host/FrameBuffer.cpp b/host/FrameBuffer.cpp
-index c8cdcaa..368a210 100644
+index c8cdcaa..a84c365 100644
 --- a/host/FrameBuffer.cpp
 +++ b/host/FrameBuffer.cpp
-@@ -1788,6 +1788,22 @@ bool FrameBuffer::postImplSync(HandleType p_colorbuffer, bool needLockAndBind, b
+@@ -16,6 +16,8 @@
+ 
+ #include "FrameBuffer.h"
+ 
++#include "ExitGate.h"
++
+ #include <stdio.h>
+ #include <string.h>
+ #include <time.h>
+@@ -1482,6 +1484,7 @@ void FrameBuffer::cleanupProcGLObjects(uint64_t puid) {
+             }
+         });
+         android::base::sleepUs(10000);
++        exit_gate::yieldPoint();  // VirtualAndroid: don't hold up exit()
+     } while (renderThreadWithThisPuidExists);
+ 
+ 
+@@ -1788,6 +1791,22 @@ bool FrameBuffer::postImplSync(HandleType p_colorbuffer, bool needLockAndBind, b
      return posted.Succeeded();
  }
  
@@ -55,7 +142,7 @@ index c8cdcaa..368a210 100644
  AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer, Post::CompletionCallback callback,
                                    bool needLockAndBind, bool repaint) {
      ColorBufferPtr colorBuffer = nullptr;
-@@ -1851,6 +1867,18 @@ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer, Post::CompletionCall
+@@ -1851,6 +1870,18 @@ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer, Post::CompletionCall
          }
      }
  
@@ -89,10 +176,19 @@ index b413a31..4593ba9 100644
  
  EGLNativeWindowType createSubWindow(FBNativeWindowType p_window, int x, int y, int width,
 diff --git a/host/RenderThread.cpp b/host/RenderThread.cpp
-index 5207b1c..0448f07 100644
+index 5207b1c..c6bc9eb 100644
 --- a/host/RenderThread.cpp
 +++ b/host/RenderThread.cpp
-@@ -80,7 +80,8 @@ static constexpr int kStreamBufferSize = 128 * 1024;
+@@ -15,6 +15,8 @@
+ */
+ #include "RenderThread.h"
+ 
++#include "ExitGate.h"
++
+ #include "ChannelStream.h"
+ #include "FrameBuffer.h"
+ #include "ReadBuffer.h"
+@@ -80,7 +82,8 @@ static constexpr int kStreamBufferSize = 128 * 1024;
  static constexpr int kMinThreadsToRunUnlimited = 5;
  
  // A thread run limiter that limits render threads to run one slice at a time.
@@ -102,6 +198,17 @@ index 5207b1c..0448f07 100644
  
  RenderThread::RenderThread(RenderChannelImpl* channel,
                             android::base::Stream* loadStream,
+@@ -459,6 +462,10 @@ intptr_t RenderThread::main() {
+             fflush(dumpFP);
+         }
+ 
++        // VirtualAndroid: one decoded batch is one unit of work for the exit
++        // gate (the blocking read above stays outside it).
++        exit_gate::Scope exitGate;
++
+         bool progress = false;
+         anyProgress = false;
+         do {
 diff --git a/host/RenderThreadInfo.cpp b/host/RenderThreadInfo.cpp
 index f95eeb0..a982cf2 100644
 --- a/host/RenderThreadInfo.cpp
@@ -117,6 +224,48 @@ index f95eeb0..a982cf2 100644
  
  RenderThreadInfo::RenderThreadInfo() {
      s_threadInfoPtr = this;
+diff --git a/host/RendererImpl.cpp b/host/RendererImpl.cpp
+index 2bfc710..c8e27ae 100644
+--- a/host/RendererImpl.cpp
++++ b/host/RendererImpl.cpp
+@@ -13,6 +13,8 @@
+ // limitations under the License.
+ #include "RendererImpl.h"
+ 
++#include "ExitGate.h"
++
+ #include <assert.h>
+ 
+ #include <algorithm>
+@@ -66,6 +68,7 @@ public:
+             using android::base::WorkerProcessingResult;
+             struct {
+                 WorkerProcessingResult operator()(CleanProcessResources resources) {
++                    exit_gate::Scope gate;  // VirtualAndroid: park once exit() begins
+                     FrameBuffer::getFB()->cleanupProcGLObjects(resources.puid);
+                     // resources.resource are destroyed automatically when going out of the scope.
+                     return WorkerProcessingResult::Continue;
+diff --git a/host/SyncThread.cpp b/host/SyncThread.cpp
+index 15e531f..509d5b7 100644
+--- a/host/SyncThread.cpp
++++ b/host/SyncThread.cpp
+@@ -16,6 +16,8 @@
+ 
+ #include "SyncThread.h"
+ 
++#include "ExitGate.h"
++
+ #if GFXSTREAM_ENABLE_HOST_GLES
+ #include "OpenGLESDispatch/OpenGLDispatchLoader.h"
+ #endif
+@@ -418,6 +420,7 @@ void SyncThread::sendAsync(std::function<void(WorkerId)> job, std::string descri
+ }
+ 
+ void SyncThread::doSyncThreadCmd(Command&& command, WorkerId workerId) {
++    exit_gate::Scope exitGate;  // VirtualAndroid: park once exit() begins
+     static thread_local std::once_flag sOnceFlag;
+     std::call_once(sOnceFlag, [&] {
+         GFXSTREAM_TRACE_NAME_TRACK(GFXSTREAM_TRACE_TRACK_FOR_CURRENT_THREAD(), "SyncThread");
 diff --git a/host/backend/meson.build b/host/backend/meson.build
 index b47d2ed..1dc720c 100644
 --- a/host/backend/meson.build

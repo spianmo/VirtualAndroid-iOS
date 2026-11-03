@@ -195,12 +195,18 @@ androidboot.qemu.vsync=<refresh_hz>
   gfxstream's static destructors and before QEMU's notifiers. It stops every
   callback and marks the process as exiting; afterwards `va_gfx_teardown()`
   and all pipe callbacks (close included) are immediate no-ops and the
-  renderer threads are left to the OS. Real guest: QEMU exits ~0.1 s after
-  SIGTERM. For an orderly shutdown (e.g. an iOS app stopping a VM but staying
+  renderer threads are left to the OS. The same handler freezes gfxstream's
+  exit gate (`host/ExitGate.h`, patched in): render batches, process-cleanup
+  items and sync commands park at their next unit of work, and the handler
+  waits up to `VA_GFX_EXIT_DRAIN_MS` (default 1000) for units in flight, so no
+  renderer thread runs while exit() destroys ANGLE/gfxstream globals. Real
+  guest: QEMU exits ~0.1 s after SIGTERM or monitor `quit`. For an orderly shutdown (e.g. an iOS app stopping a VM but staying
   alive) call `va_gfx_teardown()` before `exit()`.
 * Tested by `tests/run-exit-tests.sh <macos|ios-sim> [udid]`: pipes closed then
   teardown, exit() with live render threads, exit() while the render thread is
-  busy, QEMU's order (atexit notifier registered before dlopen closes the pipes
+  busy, a guest process with 48 contexts/surfaces/colorbuffers dying right
+  before exit() (cleanup thread busy during exit), QEMU's order (atexit
+  notifier registered before dlopen closes the pipes
   and tears down), teardown with pipes still open, and teardown while a render
   thread is wedged in the post path holding the FrameBuffer lock (must return
   at the deadline). Each run has a 30 s hang watchdog.

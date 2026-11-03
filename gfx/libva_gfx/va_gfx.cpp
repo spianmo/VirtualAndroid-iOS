@@ -63,6 +63,7 @@
 #include "host-common/window_agent.h"
 #include "render-utils/RenderLib.h"
 #include "render-utils/render_api.h"
+#include "ExitGate.h"
 
 #define VLOG(fmt, ...) fprintf(stderr, "va_gfx: " fmt "\n", ##__VA_ARGS__)
 
@@ -879,6 +880,17 @@ void onProcessExit() {
     g.shutdown.store(true);
     vagfx_present_disable();
     waker().stop();  // never joins
+    // Park render/cleanup/sync threads at their next unit of work and let the
+    // units in flight finish, so nothing runs concurrently with the static
+    // destructors exit() is about to run (heap corruption otherwise).
+    long drainMs = 1000;
+    if (const char* t = getenv("VA_GFX_EXIT_DRAIN_MS")) drainMs = atol(t);
+    bool drained = false;
+    const int busy = gfxstream::exit_gate::freeze((int)drainMs, &drained);
+    if (busy > 0 || !drained) {
+        VLOG("process exit: %d renderer work unit(s) in flight, %s", busy,
+             drained ? "drained" : "NOT drained before the deadline");
+    }
 }
 
 }  // namespace

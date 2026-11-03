@@ -315,6 +315,7 @@ enum {
     OP_rcUpdateColorBuffer = 10024,
     OP_rcCompose = 10037,
     OP_rcCreateSyncKHR = 10029,
+    OP_rcSetPuid = 10033,
     OP_glClear = 2063,
     OP_glClearColor = 2064,
     OP_glDisable = 2086,
@@ -885,6 +886,8 @@ int main(int argc, char **argv)
      *   live          exit() with open pipes and live render threads, no teardown
      *                 (QEMU SIGTERM without a shutdown handler)
      *   live-busy     like live, but with queued GL work and posts in flight
+ *   exit-cleanup-busy  a guest process with many GL objects dies right before
+ *                 exit(): the cleanup thread runs during exit()
  *   atexit        exit(); an atexit handler registered before dlopen (so it runs
  *                 after libva_gfx's and ANGLE's static destructors) closes the
  *                 pipes and calls va_gfx_teardown() -- QEMU's exit-notifier order
@@ -895,6 +898,50 @@ int main(int argc, char **argv)
      */
     const char *exit_mode = getenv("HARNESS_EXIT") ? getenv("HARNESS_EXIT") : "";
     printf("%s (%d failures)\n", failures ? "HARNESS FAILED" : "HARNESS PASSED", failures);
+    if (!strcmp(exit_mode, "exit-cleanup-busy")) {
+        /*
+         * A guest process owning lots of GL objects dies (its GLProcessPipe
+         * closes) right before the VM exits: gfxstream's ProcessCleanupThread
+         * is destroying contexts/surfaces/colorbuffers while exit() runs the
+         * static destructors (the iOS-simulator crash in ~ShaderParser).
+         */
+        FakePipe *pp = guest_open("GLProcessPipe");
+        uint64_t victim = 0;
+        if (pp) {
+            int32_t confirm = 100;
+            guest_write(pp, &confirm, 4);
+            guest_read(pp, &victim, 8);
+        }
+        FakePipe *gv = guest_open("opengles");
+        CHECK(pp && gv && victim, "victim process setup");
+        if (gv) {
+            uint32_t fl = 0;
+            guest_write(gv, &fl, 4);
+            Packet pk = pk_begin(OP_rcSetPuid);
+            pk_u32(&pk, (uint32_t)victim);
+            pk_u32(&pk, (uint32_t)(victim >> 32));
+            pk_send(gv, &pk);
+            const uint32_t cfg = rc_choose_config(gv);
+            for (int i = 0; i < 48; i++) {
+                uint32_t c = rcN(gv, OP_rcCreateContext, 1, 3, cfg, 0, 2);
+                uint32_t sf = rcN(gv, OP_rcCreateWindowSurface, 1, 3, cfg, 256, 256);
+                uint32_t cb = rcN(gv, OP_rcCreateColorBuffer, 1, 3, 256, 256, 0x1908);
+                rcN(gv, OP_rcSetWindowColorBuffer, 0, 2, sf, cb);
+                rcN(gv, OP_rcMakeCurrent, 1, 3, c, sf, sf);
+                gl_clear_color(gv, 0.5f, 0.5f, 0.5f, 1.0f);
+                rcN(gv, OP_glClear, 0, 1, 0x4000);
+                (void)rcN(gv, OP_rcFlushWindowColorBuffer, 1, 1, sf);
+            }
+            rcN(gv, OP_rcMakeCurrent, 1, 3, 0, 0, 0);
+            (void)rc0(gv, OP_rcGetRendererVersion);
+        }
+        printf("exit: victim process %llu owns 48 contexts/surfaces/colorbuffers; it dies "
+               "(both pipes close) and exit() follows immediately\n", (unsigned long long)victim);
+        if (gv) guest_close(gv); /* its render thread exits */
+        if (pp) guest_close(pp); /* queues cleanupProcGLObjects(victim) */
+        usleep(15 * 1000);       /* cleanup thread is now mid-way */
+        exit(failures ? 1 : 0);
+    }
     if (!strcmp(exit_mode, "atexit")) {
         s_atexit_mode = 1;
         printf("exit: calling exit(); the exit notifier closes the pipes and tears down\n");

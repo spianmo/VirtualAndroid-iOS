@@ -7,7 +7,7 @@ PLATFORM="${1:-macos}"; UDID="${2:-booted}"
 B="$GFX/build-$PLATFORM"; mkdir -p "$B/out"
 LOGDIR="$(cd "$GFX/.." && pwd)/.logs"
 rc=0
-for mode in "" live live-busy atexit teardown-open teardown-stuck; do
+for mode in "" live live-busy exit-cleanup-busy atexit teardown-open teardown-stuck; do
   log="$LOGDIR/gfx-exit-$PLATFORM-${mode:-closed}.log"
   if [ "$PLATFORM" = macos ]; then
     HARNESS_EXIT="$mode" VA_GFX_TEARDOWN_TIMEOUT_MS=1500 "$B/tests/va_gfx_harness" "$B/dist/libva_gfx.dylib" "$B/out" angle >"$log" 2>&1 &
