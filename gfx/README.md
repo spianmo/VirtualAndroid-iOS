@@ -15,17 +15,18 @@ libva_gfx: VaGfxEngineOps shim ─ aemu AndroidPipe services ─ gfxstream Rende
    ▼                                                ▼
 ANGLE (WebKit subset, Metal backend)               MoltenVK
    ▼
-ColorBuffer posted (rcFBPost / rcCompose) ─ BGRA readback ─ IOSurface ring ─ VaGfxPresentFn
+ColorBuffer posted (rcFBPost / rcCompose) ─ GPU blit into IOSurface pbuffer ─ IOSurface ring ─ VaGfxPresentFn
+                                           (readback + memcpy fallback for native CGL)
 ```
 
 ## Status (all verified with `tests/va_gfx_harness`)
 
 | platform | GLES backend | result |
 |---|---|---|
-| macOS arm64 | ANGLE Metal (`build-macos/dist`) | harness passes (3 frames: upload, GLES draw, rcCompose) |
+| macOS arm64 | ANGLE Metal (`build-macos/dist`) | harness passes (upload, GLES draw, rcCompose + 60-frame loop); 1080x2340 post→IOSurface 0.76 ms (zero-copy) vs 10.9 ms (readback) |
 | macOS arm64 | native CGL (`gles_backend="native"`) | upload/GLES frames pass; host compositor shaders need ANGLE's shader translator, so use ANGLE |
 | macOS arm64 | + Vulkan via MoltenVK | host advertises `ANDROID_EMU_vulkan` (tested with the SDK's prebuilt MoltenVK) |
-| iOS simulator arm64 | ANGLE Metal (`build-ios-sim/dist`) | harness passes inside the simulator (`simctl spawn`) |
+| iOS simulator arm64 | ANGLE Metal (`build-ios-sim/dist`) | harness passes inside the simulator (`simctl spawn`); 1080x2340 1.29 ms zero-copy vs 165 ms readback |
 | iOS device arm64 | ANGLE Metal (`build-ios/dist`) | builds; not run (needs a device) |
 
 xcframeworks: `build-ios-xcframeworks/{va_gfx,GLESv2}.xcframework` (device + simulator).
@@ -172,8 +173,12 @@ on load; the guest reconnects).
   connection is created through aemu's connector (`android_pipe_guest_open` +
   `"pipe:<name>"`), so the stock gfxstream/aemu `opengles`, `GLProcessPipe` and
   `refcount` services are used unmodified.
-* Frames: synchronous BGRA readback per post (`GFXSTREAM_DISABLE_ASYNC_READBACK`)
-  so a static screen is never one frame behind; cost ≈ one glReadPixels per post.
+* Frames (ANGLE): zero-copy. A small gfxstream patch calls a hook in
+  `FrameBuffer::postImpl` with the posted ColorBuffer's host texture; 
+  `va_gfx_present_gl.cpp` blits it into an IOSurface-backed ANGLE pbuffer
+  (`EGL_ANGLE_iosurface_client_buffer`), glFinish, then presents. Native CGL,
+  `VA_GFX_FORCE_READBACK=1`, or a runtime failure of the GPU path use the
+  synchronous BGRA readback path (`GFXSTREAM_DISABLE_ASYNC_READBACK`) instead.
 * Features negotiated with the guest (see `buildFeatures`): host composition,
   refcount pipe, GLES dynamic version, YUV cache, HWC multi-configs, native
   sync (if the engine provides goldfish_sync), Vulkan (if enabled + MoltenVK);
