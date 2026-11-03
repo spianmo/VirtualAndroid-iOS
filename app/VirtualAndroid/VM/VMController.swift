@@ -64,7 +64,9 @@ final class VMController: ObservableObject, EngineDelegate {
         // Developer overrides (launch arguments, e.g. `-VAMachine virt -VAAutoStopAfter 90`).
         static let machine = "VAMachine", autoStopAfter = "VAAutoStopAfter"
         static let forceOrientation = "VAForceOrientation", selfTest = "VASelfTest"
-        static let stubDiagnostics = "VAStubDiagnostics"     // e.g. "gnss,camera,mic,tone,sensors,vibrate,copy"
+        static let stubDiagnostics = "VAStubDiagnostics"
+        static let adbPort = "VAAdbPort", trace = "VATrace", dumpFrames = "VADumpFrames"
+        static let script = "VAScript"   // after boot: "wait:5;tap:0.5,0.9;wait:3;key:172"     // e.g. "gnss,camera,mic,tone,sensors,vibrate,copy"
     }
 
     init() {
@@ -93,6 +95,8 @@ final class VMController: ObservableObject, EngineDelegate {
     }
 
     // MARK: Derived state
+
+    var phaseName: String { "\(phase)" }
 
     var isVMActive: Bool { [.booting, .running, .paused, .stopping].contains(phase) }
 
@@ -155,6 +159,19 @@ final class VMController: ObservableObject, EngineDelegate {
         var cfg = VMLaunchConfig()
         cfg.storage = storage
         if let machine = defaults.string(forKey: Keys.machine), !machine.isEmpty { cfg.machine = machine }
+        let port = defaults.integer(forKey: Keys.adbPort)
+        #if targetEnvironment(simulator)
+        cfg.adbPort = port > 0 ? port : 5570
+        #else
+        cfg.adbPort = port > 0 ? port : nil
+        #endif
+        if let t = defaults.string(forKey: Keys.trace), !t.isEmpty {
+            cfg.traceEvents = t.split(separator: ",").map(String.init)
+        }
+        if defaults.bool(forKey: Keys.dumpFrames) {
+            cfg.dumpFramesDir = storage.vmDir.appendingPathComponent("frames").path
+            try? FileManager.default.createDirectory(atPath: cfg.dumpFramesDir!, withIntermediateDirectories: true)
+        }
         let engineName = kind == .qemu ? "qemu" : "stub"
 
         let snapshots = SnapshotStore(url: storage.snapshotMetadata)
@@ -319,6 +336,38 @@ final class VMController: ObservableObject, EngineDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.tapKey(LinuxKeymap.back) }
     }
 
+    /// `-VAScript`: wait:S, tap:X,Y (guest 0..1, through the view mapping and
+    /// va_engine_touch), key:CODE (down/up like the overlay buttons).
+    private func runScript(_ steps: [String]) {
+        guard let step = steps.first else { return }
+        let rest = Array(steps.dropFirst())
+        let parts = step.split(separator: ":", maxSplits: 1).map(String.init)
+        let arg = parts.count > 1 ? parts[1] : ""
+        var delay = 0.0
+        switch parts[0] {
+        case "wait":
+            delay = Double(arg) ?? 1
+        case "tap":
+            let xy = arg.split(separator: ",").compactMap { Double($0) }
+            if xy.count == 2 {
+                let p = displayView.viewPoint(forGuest: CGPoint(x: xy[0], y: xy[1]))
+                log(1, "script: tap guest (\(xy[0]), \(xy[1])) = view (\(Int(p.x)), \(Int(p.y)))")
+                displayView.injectTestTouches([p], down: true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.displayView.injectTestTouches([p], down: false) }
+                delay = 0.2
+            }
+        case "key":
+            if let code = UInt32(arg) {
+                log(1, "script: key \(LinuxKeymap.name(code))")
+                tapKey(code)
+                delay = 0.2
+            }
+        default:
+            log(2, "script: unknown step \(step)")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self.runScript(rest) }
+    }
+
     // MARK: Image setup
 
     func installImagePack(from url: URL? = nil, securityScoped: Bool = false,
@@ -466,6 +515,9 @@ final class VMController: ObservableObject, EngineDelegate {
                     for line in self.host.statusLines() { self.log(1, "status: \(line)") }
                     self.log(1, "status: display \(self.displayView.framesDrawn) frames drawn")
                 }
+            }
+            if let script = defaults.string(forKey: Keys.script), !script.isEmpty {
+                runScript(script.split(separator: ";").map(String.init))
             }
             if defaults.bool(forKey: Keys.selfTest) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.runSelfTest() }

@@ -60,8 +60,18 @@ struct QemuArgumentBuilder {
     /// Connected socket fd (socketpair) for QMP; QEMU runs in-process so it
     /// can use the fd number directly.
     var qmpFD: Int32?
-    /// Forward 127.0.0.1:port -> guest adbd (5555). Simulator/dev only.
+    /// ranchu: libva_gfx path (`-M ranchu,gfx-lib=`); nil = QEMU's default
+    /// lookup (<executable dir>/Frameworks/va_gfx.framework/va_gfx).
+    var gfxLib: String?
+    var graphics = true
+    /// adb on 127.0.0.1:port. ranchu: via va-vsock-pci (the guest's adbd
+    /// talks vsock); virt: slirp hostfwd to guest :5555.
     var adbHostPort: Int?
+    var vsockGuestCID = 77
+    var vsockPipePort = 5000
+    var traceEvents: [String] = []
+
+    var isRanchu: Bool { machine.hasPrefix("ranchu") }
     var loadvmTag: String?
     var extra: [String] = []
 
@@ -79,8 +89,16 @@ struct QemuArgumentBuilder {
     }
 
     func build() -> [String] {
+        var machineArg = machine
+        if isRanchu {
+            if !graphics {
+                machineArg += ",gfx=off"
+            } else if let gfxLib {
+                machineArg += ",gfx-lib=\(Self.escape(gfxLib))"
+            }
+        }
         var a: [String] = [
-            "-M", machine,
+            "-M", machineArg,
             "-accel", accel.qemuValue,
             "-cpu", cpu,
             "-smp", "\(cpuCount)",
@@ -103,7 +121,7 @@ struct QemuArgumentBuilder {
         a += drive(4, "system", system)
 
         var netdev = "user,id=mynet"
-        if let port = adbHostPort { netdev += ",hostfwd=tcp:127.0.0.1:\(port)-:5555" }
+        if !isRanchu, let port = adbHostPort { netdev += ",hostfwd=tcp:127.0.0.1:\(port)-:5555" }
         a += ["-netdev", netdev, "-device", "virtio-net-device,netdev=mynet"]
         a += ["-device", "virtio-rng-device"]
         a += [
@@ -113,6 +131,14 @@ struct QemuArgumentBuilder {
             "-device", "virtconsole,chardev=forhvc0",
             "-device", "virtconsole,chardev=forhvc1",
         ]
+        if isRanchu {
+            // adbd and the pipe-port services (clipboard ...) use vsock.
+            var vsock = "va-vsock-pci,guest-cid=\(vsockGuestCID)"
+            if let port = adbHostPort { vsock += ",adb-port=\(port)" }
+            vsock += ",pipe-port=\(vsockPipePort)"
+            a += ["-device", vsock]
+        }
+        for t in traceEvents { a += ["-trace", "enable=\(t)"] }
         if let fd = qmpFD {
             a += ["-chardev", "socket,id=qmp0,fd=\(fd)", "-mon", "chardev=qmp0,mode=control"]
         }

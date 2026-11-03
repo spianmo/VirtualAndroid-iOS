@@ -41,6 +41,15 @@ struct VMScreen: View {
             if vm.showNavControls {
                 NavOverlay(showDiagnostics: $showDiagnostics)
             }
+
+            // For UI tests / automation: current VM phase.
+            Text(vm.phaseName)
+                .font(.system(size: 1))
+                .opacity(0.02)
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("va-phase")
+                .accessibilityValue(vm.phaseName)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)

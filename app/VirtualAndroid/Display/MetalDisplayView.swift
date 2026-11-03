@@ -301,6 +301,13 @@ final class MetalDisplayView: UIView, FrameSink {
         input?.touch(points)
     }
 
+    /// View point for a guest panel point (0..1), for scripted taps.
+    func viewPoint(forGuest g: CGPoint) -> CGPoint {
+        let rect = contentRectInView()
+        let c = DisplayGeometry.contentPoint(guest: g, quarterTurns: quarterTurns)
+        return CGPoint(x: rect.minX + c.x * rect.width, y: rect.minY + c.y * rect.height)
+    }
+
     // MARK: Hardware keyboard
 
     override var canBecomeFirstResponder: Bool { true }

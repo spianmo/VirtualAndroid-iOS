@@ -14,14 +14,16 @@ enum BootConfig {
         "androidboot.qemu.gltransport.name": "pipe",
         "androidboot.qemu.gltransport.drawFlushInterval": "800",
         "androidboot.hardware.vulkan": "ranchu",
-        "androidboot.opengles.version": "196609",
+        // ANGLE Metal (libva_gfx) offers GLES 3.0 = (3 << 16) | 0.
+        "androidboot.opengles.version": "196608",
         "androidboot.debug.hwui.renderer": "skiagl",
         "androidboot.dalvik.vm.heapsize": "512m",
         "androidboot.logcat": "*:V",
         "androidboot.qemu.skin": "1080x2340",
         "androidboot.qemu.vsync": "60",
         "androidboot.qemu.settings.system.screen_off_timeout": "2147483647",
-        "androidboot.qemu.camera_protocol_ver": "1",
+        // The services' qemud camera speaks protocol v0 only.
+        "androidboot.qemu.camera_protocol_ver": "0",
         "androidboot.qemu.avd_name": "virtualandroid",
         // Values from the image's VerifiedBootParams.textproto.
         "androidboot.vbmeta.size": "6208",

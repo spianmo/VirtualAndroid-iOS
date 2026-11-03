@@ -39,6 +39,17 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A3C1AEC0A4E83D4EF66B8603"
+               BuildableName = "VirtualAndroidUITests.xctest"
+               BlueprintName = "VirtualAndroidUITests"
+               ReferencedContainer = "container:VirtualAndroid.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>

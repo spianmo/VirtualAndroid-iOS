@@ -59,5 +59,18 @@ targets:
         script: "\"${SRCROOT}/scripts/embed_engine_frameworks.sh\""
         basedOnDependencyAnalysis: false
     scheme:
-      testTargets: []
+      testTargets: [VirtualAndroidUITests]
       gatherCoverageData: false
+  VirtualAndroidUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Tests/UI
+    dependencies:
+      - target: VirtualAndroid
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.virtualandroid.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""

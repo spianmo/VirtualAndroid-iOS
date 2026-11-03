@@ -149,8 +149,9 @@ struct KeyButton: View {
                         send(code, false)
                     }
             )
-            .accessibilityElement()
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel(label)
+            .accessibilityIdentifier("va-key-\(code)")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction {
                 send(code, true)

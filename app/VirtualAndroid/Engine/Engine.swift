@@ -64,6 +64,12 @@ struct VMLaunchConfig {
     var restoreSnapshotTag: String?
     /// QEMU machine; "ranchu" (board) or "virt" for frameworks without it.
     var machine = "ranchu"
+    /// adb on 127.0.0.1:port (ranchu: va-vsock-pci). Default: 5570 on the
+    /// simulator (run-macos.sh uses 5555, run_sim.sh 5590), off on devices.
+    var adbPort: Int?
+    var traceEvents: [String] = []
+    /// Dev: libva_gfx also writes frames as PNGs here (VA_DUMP_FRAMES).
+    var dumpFramesDir: String?
 }
 
 enum EngineError: LocalizedError {

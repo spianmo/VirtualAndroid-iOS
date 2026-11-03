@@ -61,7 +61,7 @@ static NSError *VAError(NSString *message)
     _symbols.touch = dlsym(_handle, "va_engine_touch");
     _symbols.key = dlsym(_handle, "va_engine_key");
     _symbols.set_display_rotation = dlsym(_handle, "va_engine_set_display_rotation");
-    _symbols.set_present_callback = dlsym(_handle, "va_engine_set_present_callback");
+    _symbols.host_set_present_callback = dlsym(_handle, "va_host_set_present_callback");
     if (!_symbols.qemu_init || !_symbols.qemu_main_loop || !_symbols.qemu_cleanup) {
         if (error) {
             *error = VAError(@"framework does not export qemu_init/qemu_main_loop/qemu_cleanup");
@@ -77,20 +77,6 @@ static NSError *VAError(NSString *message)
 - (VAEngineSymbols)symbols
 {
     return _symbols;
-}
-
-- (BOOL)resolvePresentCallbackFromLibrary:(NSString *)path
-{
-    if (_symbols.set_present_callback) {
-        return YES;
-    }
-    void *h = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
-    if (!h) {
-        return NO;
-    }
-    _symbols.set_present_callback = dlsym(h, "va_gfx_set_present_callback");
-    /* Keep the library loaded: QEMU dlopens the same path and gets the same image. */
-    return _symbols.set_present_callback != NULL;
 }
 
 static void *va_qemu_thread_main(void *arg)

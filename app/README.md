@@ -35,9 +35,14 @@ Device: set `DEVELOPMENT_TEAM` in project.yml. The entitlements
   entry through the same C ABI the real engine uses.
 * `QemuEngine`: dlopens `Frameworks/qemu-aarch64-softmmu.framework`, resolves
   `qemu_init(argc, argv)` / `int qemu_main_loop()` / `qemu_cleanup(int)` (QEMU 10
-  signatures) and the `va_*` symbols, installs the callbacks, runs QEMU on an
+  signatures) and the `va_*` symbols, calls `va_host_set_callbacks()` and
+  `va_host_set_present_callback()` before `qemu_init`, runs QEMU on an
   8 MB-stack pthread with UTM's exit() interception (`Support/VAEngineRuntime.m`),
   and controls it over QMP on a socketpair (`-chardev socket,fd=N`).
+  ranchu dlopens libva_gfx (`-M ranchu,gfx-lib=<bundle>/Frameworks/va_gfx.framework/va_gfx`;
+  its default lookup is the same path) and calls the present callback on a
+  renderer thread with zero-copy BGRA IOSurfaces (row 0 = top), which the
+  Metal view retains until the next frame.
 
 Selection (`Automatic`): QEMU when the framework is embedded and an image is
 installed, else the stub. `scripts/embed_engine_frameworks.sh` (build phase)
@@ -78,10 +83,18 @@ The initrd is the ramdisk + bootconfig (`VM/BootConfig.swift`, byte-identical
 port of `tools/make_initrd.py`), with `androidboot.opengles.version` from
 `va_gfx_get_gles_version()` (cached from the previous run; 196608 = GLES 3.0
 for ANGLE Metal otherwise). QEMU argv (`VM/QemuArguments.swift`) mirrors
-`tools/run-macos.sh`: `-M ranchu` (override `-VAMachine virt`), cortex-a76,
-4 vCPU, 2 GB, disks vendor/encrypt/userdata/cache/system in that order
-(writable ones qcow2 so `savevm` works), virtio net (+adb 127.0.0.1:5570 on the
-simulator), rng, virtio-serial hvc0/hvc1 (logcat) into files, QMP.
+`tools/run-macos.sh --machine ranchu`: `-M ranchu,gfx-lib=...` (override
+`-VAMachine virt`), cortex-a76, 4 vCPU, 2 GB, disks vendor/encrypt/userdata/
+cache/system in that order (writable ones qcow2 so `savevm` works), virtio net
+(no slirp adb forward on ranchu), rng, virtio-serial hvc0/hvc1 (logcat) into
+files, `-device va-vsock-pci,guest-cid=77,adb-port=<port>,pipe-port=5000`
+(adbd and the clipboard service talk vsock), QMP. adb: port 5570 on the
+simulator (it shares the Mac's loopback: `adb connect 127.0.0.1:5570`),
+off on devices unless `-VAAdbPort N`. Bootconfig: `opengles.version=196608`
+(ANGLE Metal GLES 3.0), `camera_protocol_ver=0`, and for dev builds
+`androidboot.qemu.adb.pubkey` from `adbkey.pub` (Documents/adbkey.pub, else the
+image pack's copy, which `make_userdata_qcow2.sh --pack` takes from
+`~/.android/adbkey.pub`; `VA_NO_ADBKEY=1` for packs you give away).
 
 Snapshot placeholder (M4, `VM/SnapshotStore.swift`): "Quick boot" saves
 `savevm va-quickboot` after the first boot and boots with `-loadvm` when the
@@ -128,6 +141,29 @@ gfx pipes before it can work with QEMU; the stub simulates it.
 
 Sensor timestamps are host CLOCK_UPTIME_RAW ns (CoreMotion's time base).
 
+## Real boot in the simulator (measured 2026-11-04, iPhone 17 Pro sim, TCG JIT, M2 Max under load)
+
+| run | BOOT_COMPLETED (from VM start) | launcher focused (from app launch) |
+|---|---|---|
+| first launch (image install + fresh userdata) | 170.6 s | ~187 s |
+| later launches (warm userdata) | 70.2 s / 79.4 s | ≤ 97 s (first check) |
+
+End-to-end UI test (`Tests/UI/RealBootUITests.swift`, real UIKit taps on the
+Metal view and the overlay; TEST EXECUTE SUCCEEDED): tap Gallery -> adb focus
+`com.android.gallery3d/.app.GalleryActivity`; overlay HOME -> Launcher3;
+tap Phone -> `com.android.dialer/.main.impl.MainActivity`; overlay BACK ->
+Launcher3; menu "Force stop" -> QMP quit, `qemu_cleanup`, app stays alive.
+
+```sh
+xcodebuild ... build-for-testing
+xcodebuild -project app/VirtualAndroid.xcodeproj -scheme VirtualAndroid \
+  -destination 'platform=iOS Simulator,id=<udid>' -derivedDataPath app/build/DerivedData \
+  test-without-building -only-testing:VirtualAndroidUITests   # needs the image pack installed
+```
+
+Screenshots: `docs/screenshot-real-boot.png`, `docs/screenshot-real-home.png`,
+`docs/screenshot-real-gallery-after-tap.png`.
+
 ## Developer launch arguments
 
 `-VAEngine stub|qemu|auto`, `-VAAutoBoot YES|NO`, `-VAMachine virt`,
@@ -136,7 +172,9 @@ Sensor timestamps are host CLOCK_UPTIME_RAW ns (CoreMotion's time base).
 `-VASelfTest YES` (injects two touches + VOL+/BACK after boot),
 `-VAStubDiagnostics gnss,camera,mic,tone,sensors,vibrate,copy` (stub: simulate
 guest requests after boot and log every bridge's status 6 s later),
-`-VASimulatorMic YES`. Pre-grant simulator permissions with
+`-VASimulatorMic YES`, `-VAAdbPort N`, `-VATrace event,...`, `-VADumpFrames YES`
+(libva_gfx PNG dumps in vms/default/frames), `-VAScript "wait:5;tap:0.31,0.74;key:172"`
+(after boot: guest-coordinate taps through the view mapping, keys). Pre-grant simulator permissions with
 `xcrun simctl privacy <udid> grant location|camera|microphone|motion dev.virtualandroid.app`
 and set a position with `xcrun simctl location <udid> set <lat>,<lon>`.
 Guest logs: `vms/default/{serial,logcat,hvc0}.log` in the app container.

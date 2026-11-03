@@ -73,30 +73,13 @@ final class QemuEngine: VMEngine {
 
     static var isAvailable: Bool { selectFramework() != nil }
 
-    private static let glesVersionKey = "VAGlesVersion"
-
-    /// GLES version the renderer offers, via va_gfx_get_gles_version()
-    /// (documented as valid after va_gfx_init, which QEMU calls later; so a
-    /// value seen in an earlier run is cached and used for the bootconfig).
-    static func queryGlesVersion() -> (Int32, Int32)? {
-        guard let path = gfxLibraryPath, let h = dlopen(path, RTLD_NOW | RTLD_LOCAL),
-              let sym = dlsym(h, "va_gfx_get_gles_version") else { return nil }
-        typealias Fn = @convention(c) (UnsafeMutablePointer<Int32>?, UnsafeMutablePointer<Int32>?) -> Int32
-        var major: Int32 = 0, minor: Int32 = 0
-        guard unsafeBitCast(sym, to: Fn.self)(&major, &minor) == 0, major >= 2 else { return nil }
-        UserDefaults.standard.set(Int((major << 16) | minor), forKey: glesVersionKey)
-        return (major, minor)
-    }
-
     /// androidboot.* overrides for this host (bootconfig in the initrd).
+    /// androidboot.opengles.version (196608, ANGLE Metal GLES 3.0) and
+    /// camera_protocol_ver (0) are BootConfig defaults, as in tools/make_initrd.py.
     static func bootOverrides(config: VMLaunchConfig) -> [String: String] {
         var o = ["androidboot.qemu.skin": "\(config.displayWidth)x\(config.displayHeight)"]
-        if let (major, minor) = queryGlesVersion() {
-            o["androidboot.opengles.version"] = "\((major << 16) | minor)"
-        } else if let cached = UserDefaults.standard.object(forKey: glesVersionKey) as? Int {
-            o["androidboot.opengles.version"] = "\(cached)"
-        } else if gfxLibraryPath != nil {
-            o["androidboot.opengles.version"] = "196608"    // ANGLE Metal offers GLES 3.0 (gfx/README.md)
+        if let key = config.storage?.adbPublicKey {
+            o["androidboot.qemu.adb.pubkey"] = key
         }
         return o
     }
@@ -125,23 +108,22 @@ final class QemuEngine: VMEngine {
             DispatchQueue.main.async { self?.guestStateChanged(state) }
         }
         var callbacks = host.makeCallbacks()
-        var syms = runner.symbols
+        let syms = runner.symbols
         if let set = syms.host_set_callbacks {
             set(&callbacks)
         } else {
             log(2, "engine does not export va_host_set_callbacks; platform bridges disabled")
         }
 
-        // Frames: needs the (proposed) present hook, see README "Engine integration".
+        // Frames: ranchu loads libva_gfx and hands it this callback (before qemu_init).
         let gfx = Self.gfxLibraryPath
-        if let gfx { _ = runner.resolvePresentCallback(fromLibrary: gfx) }
-        syms = runner.symbols
         symbols = syms
-        if let setPresent = syms.set_present_callback {
+        if let setPresent = syms.host_set_present_callback {
             setPresent(qemuPresentTrampoline, Unmanaged.passUnretained(self).toOpaque())
         } else {
-            log(2, "no va_engine_set_present_callback/va_gfx_set_present_callback: display will stay black")
+            log(2, "engine does not export va_host_set_present_callback: display will stay black")
         }
+        if gfx == nil { log(2, "va_gfx.framework not embedded: booting without graphics") }
 
         // QMP over a socketpair; QEMU owns fds[1].
         var fds: [Int32] = [-1, -1]
@@ -172,15 +154,15 @@ final class QemuEngine: VMEngine {
             logcatLog: storage.logcatLog)
         builder.qmpFD = fds[1]
         builder.loadvmTag = config.restoreSnapshotTag
-        #if targetEnvironment(simulator)
-        builder.adbHostPort = 5570    // `adb connect 127.0.0.1:5570` (run-macos.sh uses 5555, run_sim.sh 5590)
-        #endif
+        builder.gfxLib = gfx
+        builder.graphics = gfx != nil
+        builder.adbHostPort = config.adbPort
+        builder.traceEvents = config.traceEvents
         let argv = builder.build()
         log(1, "qemu " + argv.joined(separator: " "))
 
         var env: [String: String] = [:]
-        if let gfx { env["VA_GFX_LIBRARY"] = gfx }
-        env["VA_DISPLAY"] = "\(config.displayWidth)x\(config.displayHeight)@\(config.displayDPI)/\(config.refreshHz)"
+        if let dump = config.dumpFramesDir { env["VA_DUMP_FRAMES"] = dump }
 
         progress = BootProgressTracker(serial: storage.serialLog, logcat: storage.logcatLog) { [weak self] f, msg in
             guard let self else { return }
@@ -235,7 +217,6 @@ final class QemuEngine: VMEngine {
         guestState = state
         if state == VA_GUEST_BOOT_COMPLETED {
             progress?.stop()
-            _ = Self.queryGlesVersion()   // renderer initialized by now: cache for the next bootconfig
         }
         delegate?.engine(self, guestStateChanged: state)
     }
@@ -254,10 +235,20 @@ final class QemuEngine: VMEngine {
         DispatchQueue.main.async { self.delegate?.engine(self, log: level, message: msg) }
     }
 
+    private var framesReceived: UInt64 = 0
+
+    /// Renderer thread, no BQL. The IOSurface is only guaranteed during the
+    /// call; storing it in DisplayFrame retains it (ARC = CFRetain) until the
+    /// view replaces it, and libva_gfx never recycles a retained surface.
     fileprivate func present(_ frame: UnsafePointer<VaGfxFrame>) {
         let f = frame.pointee
         guard let raw = f.iosurface else { return }
         let surface = Unmanaged<IOSurfaceRef>.fromOpaque(raw).takeUnretainedValue()
+        framesReceived += 1
+        if framesReceived == 1 {
+            log(1, "first guest frame \(f.width)x\(f.height) (format \(String(format: "%08x", IOSurfaceGetPixelFormat(surface))))")
+            DispatchQueue.main.async { self.delegate?.engine(self, bootProgress: 0.6, message: "First frame") }
+        }
         frames?.present(DisplayFrame(surface: surface, width: Int(f.width), height: Int(f.height),
                                      rotationDegrees: Int(f.rotation_deg), number: f.frame_number))
     }
@@ -314,6 +305,7 @@ final class BootProgressTracker {
         ("Run /init as init process", 0.12, "Starting init"),
         ("init: Loading SELinux policy", 0.18, "Loading SELinux policy"),
         ("starting service 'zygote", 0.35, "Starting zygote"),
+        ("starting service 'bootanim'", 0.45, "Boot animation"),
         ("Entered the Android system server", 0.50, "Starting system server"),
         ("SystemServerTiming: StartActivityManagerReadyPhase", 0.70, "Starting services"),
         ("System now ready", 0.80, "System ready"),

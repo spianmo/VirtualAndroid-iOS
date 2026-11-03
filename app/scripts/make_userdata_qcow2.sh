@@ -12,6 +12,7 @@
 #                  (APFS clones via cp -c, no extra disk space on the same
 #                  volume) and encryptionkey.qcow2 from the Android image
 #                  (default: <repo>/images/android-33/arm64-v8a), plus manifest.json
+#                  and ~/.android/adbkey.pub (dev; VA_NO_ADBKEY=1 omits it)
 #
 # Tools: engine/build-macos/qemu-img (QEMU_IMG overrides) and e2fsprogs
 # (brew install e2fsprogs). Inode tables and journal are zeroed on the host
@@ -65,6 +66,13 @@ if (( PACK )); then
   for f in VerifiedBootParams.textproto build.prop; do
     [[ -f $IMG/$f ]] && cp $IMG/$f $OUT/$f
   done
+  # Dev builds: this Mac's adb key, so the guest's adbd trusts it without a
+  # prompt (androidboot.qemu.adb.pubkey). Do not ship it in a release pack.
+  if [[ -f ~/.android/adbkey.pub && ${VA_NO_ADBKEY:-0} != 1 ]]; then
+    cp ~/.android/adbkey.pub $OUT/adbkey.pub
+  else
+    rm -f $OUT/adbkey.pub
+  fi
   # Metadata partition as qcow2 too: every writable disk must support savevm.
   $QEMU_IMG convert -q -f raw -O qcow2 $IMG/encryptionkey.img $OUT/encryptionkey.qcow2
   rm -f $OUT/encryptionkey.img

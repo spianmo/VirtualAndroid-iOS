@@ -48,7 +48,9 @@ struct VMStorage {
         ["kernel-ranchu"], ["ramdisk.img"], ["system.img"], ["vendor.img"],
         ["encryptionkey.qcow2", "encryptionkey.img"], ["userdata.qcow2"], ["cache.qcow2"],
     ]
-    static let optionalPackFiles = ["manifest.json", "VerifiedBootParams.textproto", "build.prop"]
+    /// adbkey.pub (dev builds): the Mac's ~/.android/adbkey.pub, passed as
+    /// androidboot.qemu.adb.pubkey so adbd accepts that host without a prompt.
+    static let optionalPackFiles = ["manifest.json", "VerifiedBootParams.textproto", "build.prop", "adbkey.pub"]
 
     private var fm: FileManager { .default }
 
@@ -75,6 +77,22 @@ struct VMStorage {
 
     func missingImageFiles() -> [String] {
         Self.requiredPackFiles.filter { installedTemplate($0) == nil }.map { $0.joined(separator: "|") }
+    }
+
+    /// Dev adb public key: Documents/adbkey.pub overrides the image pack's.
+    var adbPublicKey: String? {
+        var candidates: [URL] = []
+        if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+            candidates.append(docs.appendingPathComponent("adbkey.pub"))
+        }
+        candidates.append(imageDir.appendingPathComponent("adbkey.pub"))
+        for url in candidates {
+            if let s = try? String(contentsOf: url, encoding: .utf8) {
+                let key = s.replacingOccurrences(of: "\n", with: "").trimmingCharacters(in: .whitespaces)
+                if !key.isEmpty, !key.contains("\"") { return key }
+            }
+        }
+        return nil
     }
 
     var isVMCreated: Bool { exists(userdata) && exists(cache) && exists(encryption) }

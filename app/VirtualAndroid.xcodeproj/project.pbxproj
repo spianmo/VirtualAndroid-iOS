@@ -22,6 +22,7 @@
 		786E1B1A9D5805DB98BBB02E /* VMStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7EEB024F237017E3FB9648D /* VMStorage.swift */; };
 		7D2852C0762EBFDBA25E81C3 /* BatteryBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7611DD2037B250075CCA2648 /* BatteryBridge.swift */; };
 		7F7A62DB9B1DF31F870E9DB4 /* VMController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AEDE463D118D3ABD1A746FB /* VMController.swift */; };
+		8C49E6FB2484B555303EA9C3 /* RealBootUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C156C51494F31D729C8695F /* RealBootUITests.swift */; };
 		8DDD568B3337CDF0553C6A17 /* SnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 051BF7C63D2D1F7FAE2646C9 /* SnapshotStore.swift */; };
 		904B41C6D5D4A4B33D7CE8C9 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EDF9409366C9FE111CA6AEF /* HomeView.swift */; };
 		ACA6C05C1CAEE01E98CAE626 /* HostBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EDDF11BD258C91FE07267F2 /* HostBridge.swift */; };
@@ -38,6 +39,16 @@
 		F7E33998DF4807F00460414D /* DiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86E16100EF32AB027A2878F7 /* DiagnosticsView.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		03E78C322F7ECB0C35DB738D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 69DFE9CB3843034F9117A831 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7397AF641FC28E2A38BDE5D5;
+			remoteInfo = VirtualAndroid;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		051BF7C63D2D1F7FAE2646C9 /* SnapshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotStore.swift; sourceTree = "<group>"; };
 		09CF32C012D3E489C68B8163 /* QMPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QMPClient.swift; sourceTree = "<group>"; };
@@ -46,10 +57,12 @@
 		1ABEDDE583E5BC3EBD38A7BF /* CameraBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraBridge.swift; sourceTree = "<group>"; };
 		1C424578983F40828262957C /* VAEngineRuntime.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VAEngineRuntime.h; sourceTree = "<group>"; };
 		1EF996CA9CF335A4A55E1337 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		2F373EC3312A7A8CFA61FDE3 /* VirtualAndroidUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = VirtualAndroidUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		2FCA81FECD888DC17CB086DF /* MetalDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalDisplayView.swift; sourceTree = "<group>"; };
 		324F7D4365E8B9C8EF578E0F /* LinuxKeymap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinuxKeymap.swift; sourceTree = "<group>"; };
 		4E7043FFBF44189BD8C41198 /* VirtualAndroidApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualAndroidApp.swift; sourceTree = "<group>"; };
 		5AEDE463D118D3ABD1A746FB /* VMController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VMController.swift; sourceTree = "<group>"; };
+		5C156C51494F31D729C8695F /* RealBootUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealBootUITests.swift; sourceTree = "<group>"; };
 		5EDDF11BD258C91FE07267F2 /* HostBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostBridge.swift; sourceTree = "<group>"; };
 		603048A9109FC53793A98FE3 /* VARingBuffer.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = VARingBuffer.c; sourceTree = "<group>"; };
 		61BD34C5D6F3EF60160E74D7 /* AudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioBridge.swift; sourceTree = "<group>"; };
@@ -96,6 +109,7 @@
 		49E94C8CA3D25FCF1AC8524F = {
 			isa = PBXGroup;
 			children = (
+				701B5F15BB376514F7796491 /* Tests */,
 				12168294CF7233655EFFB2FF /* VirtualAndroid */,
 				EBEFC6C6DF62200BC6AFEF9A /* Products */,
 			);
@@ -115,6 +129,14 @@
 				4E7043FFBF44189BD8C41198 /* VirtualAndroidApp.swift */,
 			);
 			path = App;
+			sourceTree = "<group>";
+		};
+		701B5F15BB376514F7796491 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				A0580AA2A12AFB63344F41DC /* UI */,
+			);
+			path = Tests;
 			sourceTree = "<group>";
 		};
 		74E16D71D63F2E463CE73C39 /* Bridges */ = {
@@ -177,6 +199,14 @@
 			path = VM;
 			sourceTree = "<group>";
 		};
+		A0580AA2A12AFB63344F41DC /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				5C156C51494F31D729C8695F /* RealBootUITests.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
 		DDDC6BB0E975AA5F5EA7BB51 /* Support */ = {
 			isa = PBXGroup;
 			children = (
@@ -196,6 +226,7 @@
 			isa = PBXGroup;
 			children = (
 				6EB1629B36469CCDE4BF656F /* VirtualAndroid.app */,
+				2F373EC3312A7A8CFA61FDE3 /* VirtualAndroidUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -221,6 +252,24 @@
 			productReference = 6EB1629B36469CCDE4BF656F /* VirtualAndroid.app */;
 			productType = "com.apple.product-type.application";
 		};
+		A3C1AEC0A4E83D4EF66B8603 /* VirtualAndroidUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 06AF7CCE6C00DB739AC2F505 /* Build configuration list for PBXNativeTarget "VirtualAndroidUITests" */;
+			buildPhases = (
+				B02027F3A7626149C35C3B53 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E085935435B64030FF4D1921 /* PBXTargetDependency */,
+			);
+			name = VirtualAndroidUITests;
+			packageProductDependencies = (
+			);
+			productName = VirtualAndroidUITests;
+			productReference = 2F373EC3312A7A8CFA61FDE3 /* VirtualAndroidUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -233,6 +282,11 @@
 					7397AF641FC28E2A38BDE5D5 = {
 						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
+					};
+					A3C1AEC0A4E83D4EF66B8603 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+						TestTargetID = 7397AF641FC28E2A38BDE5D5;
 					};
 				};
 			};
@@ -251,6 +305,7 @@
 			projectRoot = "";
 			targets = (
 				7397AF641FC28E2A38BDE5D5 /* VirtualAndroid */,
+				A3C1AEC0A4E83D4EF66B8603 /* VirtualAndroidUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -314,7 +369,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B02027F3A7626149C35C3B53 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8C49E6FB2484B555303EA9C3 /* RealBootUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E085935435B64030FF4D1921 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7397AF641FC28E2A38BDE5D5 /* VirtualAndroid */;
+			targetProxy = 03E78C322F7ECB0C35DB738D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		814ED11224335658040F639B /* Release */ = {
@@ -475,6 +546,25 @@
 			};
 			name = Debug;
 		};
+		9E850679F3F146353700BBE6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.virtualandroid.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = VirtualAndroid;
+			};
+			name = Release;
+		};
 		A078ABE7E8407F3DD35FBC95 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -505,9 +595,37 @@
 			};
 			name = Debug;
 		};
+		B95E3891B4102AC60BF2E304 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.virtualandroid.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = VirtualAndroid;
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		06AF7CCE6C00DB739AC2F505 /* Build configuration list for PBXNativeTarget "VirtualAndroidUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B95E3891B4102AC60BF2E304 /* Debug */,
+				9E850679F3F146353700BBE6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		0DFBA1AA5B0C570F7A39FAEE /* Build configuration list for PBXNativeTarget "VirtualAndroid" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

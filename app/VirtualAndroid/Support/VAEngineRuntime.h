@@ -30,11 +30,9 @@ typedef struct VAEngineSymbols {
     void (*_Nullable key)(uint32_t linux_keycode, bool down);
     void (*_Nullable set_display_rotation)(int degrees);
 
-    /* NOT in the contract yet (proposed): engine forwards this present
-     * callback to va_gfx_init(). Looked up as "va_engine_set_present_callback"
-     * in the engine and "va_gfx_set_present_callback" in libva_gfx. */
-    void (*_Nullable set_present_callback)(VaGfxPresentFn _Nullable fn,
-                                           void *_Nullable opaque);
+    /* Engine passes this to va_gfx_init() as its VaGfxPresentFn. */
+    void (*_Nullable host_set_present_callback)(VaHostPresentFn _Nullable fn,
+                                                void *_Nullable opaque);
 } VAEngineSymbols;
 
 typedef void (^VAEngineExitHandler)(int status, BOOL fatal);
@@ -47,10 +45,6 @@ typedef void (^VAEngineExitHandler)(int status, BOOL fatal);
 
 - (nullable instancetype)initWithLibraryPath:(NSString *)path
                                        error:(NSError *_Nullable *_Nullable)error;
-
-/* Look up an optional symbol in another already-loaded/loadable library
- * (e.g. libva_gfx) and install it into symbols.set_present_callback. */
-- (BOOL)resolvePresentCallbackFromLibrary:(NSString *)path;
 
 /* argv[0] is supplied by the runner ("qemu-system-aarch64"). */
 - (BOOL)startWithArguments:(NSArray<NSString *> *)arguments

@@ -28,6 +28,16 @@ enum DisplayGeometry {
 
     /// View point (normalized to the content rect: u right, v down) -> guest
     /// panel coordinates (0..1), inverting the drawing rotation.
+    /// Inverse of guestPoint: guest panel (0..1) -> normalized content rect.
+    static func contentPoint(guest g: CGPoint, quarterTurns: Int) -> CGPoint {
+        switch quarterTurns & 3 {
+        case 1: return CGPoint(x: 1 - g.y, y: g.x)
+        case 2: return CGPoint(x: 1 - g.x, y: 1 - g.y)
+        case 3: return CGPoint(x: g.y, y: 1 - g.x)
+        default: return g
+        }
+    }
+
     static func guestPoint(u: CGFloat, v: CGFloat, quarterTurns: Int) -> CGPoint {
         switch quarterTurns & 3 {
         case 1: return CGPoint(x: v, y: 1 - u)

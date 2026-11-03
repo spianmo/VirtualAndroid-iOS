@@ -54,7 +54,19 @@ let drives = argv.enumerated().filter { $0.element == "-drive" }.map { argv[$0.o
 check(drives.map { $0.components(separatedBy: ",")[1] } == ["id=vendor", "id=encrypt", "id=userdata", "id=cache", "id=system"], "disk order")
 check(drives[0].hasSuffix("format=raw,read-only=on") && drives[2].contains("format=qcow2"), "disk formats")
 check(argv.contains("socket,id=qmp0,fd=7") && argv.contains("chardev=qmp0,mode=control"), "qmp chardev")
-check(argv.contains("user,id=mynet,hostfwd=tcp:127.0.0.1:5555-:5555"), "adb forward")
+// ranchu (default): adb over va-vsock-pci, no slirp forward; like run-macos.sh --machine ranchu.
+check(argv.contains("user,id=mynet"), "no hostfwd on ranchu")
+check(argv.contains("va-vsock-pci,guest-cid=77,adb-port=5555,pipe-port=5000"), "vsock adb")
+check(argv[argv.firstIndex(of: "-M")! + 1] == "ranchu", "machine ranchu (bundle gfx lookup)")
+var bv = b
+bv.machine = "virt"
+let argvVirt = bv.build()
+check(argvVirt.contains("user,id=mynet,hostfwd=tcp:127.0.0.1:5555-:5555") && !argvVirt.contains("-device") == false, "virt hostfwd")
+check(!argvVirt.joined(separator: " ").contains("va-vsock-pci"), "no vsock on virt")
+b.gfxLib = "/a,b/va_gfx"
+check(b.build().contains("ranchu,gfx-lib=/a,,b/va_gfx"), "gfx-lib escaped")
+b.graphics = false
+check(b.build().contains("ranchu,gfx=off"), "gfx off")
 check(QemuArgumentBuilder.escape("/a,b") == "/a,,b", "comma escape")
 check(AccelMode.tcti.qemuValue == "tcg,thread=multi,tb-size=512", "tcti accel")
 
