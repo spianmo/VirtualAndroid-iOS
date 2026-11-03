@@ -58,6 +58,27 @@ extern void *aot_RT[] __attribute__((visibility("hidden")));
 #endif
 
 /*
+ * goto_tb: R[k] is the TCTI goto_tb gadget of this TB, followed by its
+ * jump slot.  If the slot is chained to a TB that also has native code
+ * ([gadget_aot_enter, rec] header), tail-call it directly; otherwise let the
+ * TCTI dispatcher take the slot (chained TCTI TB or unchained exit).
+ * rec layout: call at word 0, w[] at word 5 (see AotRec in tcg/aot.c).
+ */
+#if defined(AOT_VERIFY) || defined(AOT_NO_CHAIN)
+#define AOT_GOTO_TB(k) return R[k]
+#else
+#define AOT_GOTO_TB(k) do { \
+        uintptr_t p_ = R[k]; \
+        uintptr_t t_ = __atomic_load_n((uintptr_t *)(p_ + 8), __ATOMIC_RELAXED); \
+        if (*(uintptr_t *)t_ == (uintptr_t)aot_RT[4]) { \
+            const uintptr_t *r_ = *(const uintptr_t **)(t_ + 8); \
+            __attribute__((musttail)) return ((aot_fn_t)r_[0])(env_, r_ + 5, ra); \
+        } \
+        return p_; \
+    } while (0)
+#endif
+
+/*
  * Softmmu TLB fast path, same test as the aarch64 JIT backend:
  * comparator == (addr [+ s_mask - a_mask]) & (page_mask | a_mask).
  * Returns the host address or 0 (miss, MMIO, watchpoint, misalignment...).
@@ -139,6 +160,67 @@ static inline uint64_t aot_div64(uint64_t a, uint64_t b)
 static inline uint64_t aot_rem64(uint64_t a, uint64_t b) { return a - aot_div64(a, b) * b; }
 static inline uint64_t aot_divu64(uint64_t a, uint64_t b) { return b ? a / b : 0; }
 static inline uint64_t aot_remu64(uint64_t a, uint64_t b) { return a - aot_divu64(a, b) * b; }
+
+/* Vector temps (TCG_TYPE_V64/V128) are kept as 128-bit values; V64 ops only
+ * ever load/store the low 8 bytes and all TCG vector ops are lane-local. */
+typedef uint64_t aot_v128 __attribute__((vector_size(16)));
+typedef uint8_t  aot_u8  __attribute__((vector_size(16)));
+typedef int8_t   aot_s8  __attribute__((vector_size(16)));
+typedef uint16_t aot_u16 __attribute__((vector_size(16)));
+typedef int16_t  aot_s16 __attribute__((vector_size(16)));
+typedef uint32_t aot_u32 __attribute__((vector_size(16)));
+typedef int32_t  aot_s32 __attribute__((vector_size(16)));
+typedef uint64_t aot_u64 __attribute__((vector_size(16)));
+typedef int64_t  aot_s64 __attribute__((vector_size(16)));
+
+static inline aot_v128 aot_vld(const char *p, int is128)
+{
+    aot_v128 v = { 0, 0 };
+    memcpy(&v, p, is128 ? 16 : 8);
+    return v;
+}
+static inline void aot_vst(char *p, aot_v128 v, int is128)
+{
+    memcpy(p, &v, is128 ? 16 : 8);
+}
+
+/* AArch64 SSHL lane semantics (TCTI aa64_sshl_vec). */
+static inline aot_v128 aot_sshl8(aot_v128 a_, aot_v128 b_)
+{
+    int8_t a[16], r[16]; uint8_t b[16]; memcpy(a, &a_, 16); memcpy(b, &b_, 16);
+    for (int i = 0; i < 16; i++) {
+        int c = (int8_t)b[i];
+        r[i] = c >= 0 ? (c >= 8 ? 0 : (int8_t)((uint8_t)a[i] << c)) : (-c >= 8 ? (a[i] < 0 ? -1 : 0) : a[i] >> -c);
+    }
+    aot_v128 o; memcpy(&o, r, 16); return o;
+}
+static inline aot_v128 aot_sshl16(aot_v128 a_, aot_v128 b_)
+{
+    int16_t a[8], r[8]; uint16_t b[8]; memcpy(a, &a_, 16); memcpy(b, &b_, 16);
+    for (int i = 0; i < 8; i++) {
+        int c = (int8_t)b[i];
+        r[i] = c >= 0 ? (c >= 16 ? 0 : (int16_t)((uint16_t)a[i] << c)) : (-c >= 16 ? (a[i] < 0 ? -1 : 0) : a[i] >> -c);
+    }
+    aot_v128 o; memcpy(&o, r, 16); return o;
+}
+static inline aot_v128 aot_sshl32(aot_v128 a_, aot_v128 b_)
+{
+    int32_t a[4], r[4]; uint32_t b[4]; memcpy(a, &a_, 16); memcpy(b, &b_, 16);
+    for (int i = 0; i < 4; i++) {
+        int c = (int8_t)b[i];
+        r[i] = c >= 0 ? (c >= 32 ? 0 : (int32_t)((uint32_t)a[i] << c)) : (-c >= 32 ? (a[i] < 0 ? -1 : 0) : a[i] >> -c);
+    }
+    aot_v128 o; memcpy(&o, r, 16); return o;
+}
+static inline aot_v128 aot_sshl64(aot_v128 a_, aot_v128 b_)
+{
+    int64_t a[2], r[2]; uint64_t b[2]; memcpy(a, &a_, 16); memcpy(b, &b_, 16);
+    for (int i = 0; i < 2; i++) {
+        int c = (int8_t)b[i];
+        r[i] = c >= 0 ? (c >= 64 ? 0 : (int64_t)((uint64_t)a[i] << c)) : (-c >= 64 ? (a[i] < 0 ? -1 : 0) : a[i] >> -c);
+    }
+    aot_v128 o; memcpy(&o, r, 16); return o;
+}
 
 static inline uint64_t aot_mask(unsigned len)
 {

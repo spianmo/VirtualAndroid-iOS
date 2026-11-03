@@ -71,7 +71,8 @@ def parse(path):
 
 
 class Gen:
-    def __init__(self, layout):
+    def __init__(self, layout, syms=None):
+        self.syms = syms
         self.helpers = collections.OrderedDict()  # (name, off) -> index
         ldst = [int(x) for x in layout["ldst"].split(",")]
         for sym, off in zip(LDST_SYMS, ldst):
@@ -83,6 +84,81 @@ class Gen:
         if k not in self.helpers:
             self.helpers[k] = len(self.helpers)
         return self.helpers[k]
+
+    def gen_vec(self, op, ty, vece, no, ni, ta, ca, ex, base, E):
+        if ty not in (3, 4):
+            raise Unsupported(f"vector type {ty}")
+        q = 1 if ty == 4 else 0
+        bits = 8 << vece
+        VT, ST = f"aot_u{bits}", f"aot_s{bits}"
+        lane = {8: "uint8_t", 16: "uint16_t", 32: "uint32_t", 64: "uint64_t"}[bits]
+        o = [ex(t) for t in ta[:no]]
+        i = [ex(t) for t in ta[no:]]
+        R = lambda e: f"  {o[0]} = (aot_v128)({e});"
+        BINV = {"add": "+", "sub": "-", "mul": "*"}
+        LOG = {"and": "{a} & {b}", "or": "{a} | {b}", "xor": "{a} ^ {b}", "andc": "{a} & ~{b}",
+               "orc": "{a} | ~{b}", "nand": "~({a} & {b})", "nor": "~({a} | {b})", "eqv": "~({a} ^ {b})"}
+        if op == "ld":
+            E(f"  {o[0]} = aot_vld({base(ta[no])} + {s64(ca[0])}, {q});")
+        elif op == "st":
+            E(f"  aot_vst({base(ta[1])} + {s64(ca[0])}, {i[0]}, {q});")
+        elif op == "mov":
+            E(f"  {o[0]} = {i[0]};")
+        elif op == "dup":
+            E(R(f"({VT}){{0}} + ({lane})({i[0]})"))
+        elif op == "dupm":
+            E(R(f"({VT}){{0}} + *({lane} *)({base(ta[no])} + {s64(ca[0])})"))
+        elif op in BINV:
+            E(R(f"({VT})({i[0]}) {BINV[op]} ({VT})({i[1]})"))
+        elif op in LOG:
+            E(R(LOG[op].format(a=f"({i[0]})", b=f"({i[1]})")))
+        elif op == "not":
+            E(R(f"~({i[0]})"))
+        elif op == "neg":
+            E(R(f"-({VT})({i[0]})"))
+        elif op == "abs":
+            E(R(f"__builtin_elementwise_abs(({ST})({i[0]}))"))
+        elif op in ("shli", "shri", "sari"):
+            n = int(ca[0], 16)
+            t = ST if op == "sari" else VT
+            sh = "<<" if op == "shli" else ">>"
+            E(R(f"({t})({i[0]}) {sh} {n}"))
+        elif op == "rotli":
+            n = int(ca[0], 16)
+            E(R(f"(({VT})({i[0]}) << {n}) | (({VT})({i[0]}) >> ({bits - n} & {bits - 1}))") if n else f"  {o[0]} = {i[0]};")
+        elif op in ("shlv", "shrv", "sarv"):
+            t = ST if op == "sarv" else VT
+            sh = "<<" if op == "shlv" else ">>"
+            E(R(f"({t})({i[0]}) {sh} (({t})(({VT})({i[1]}) & {bits - 1}))"))
+        elif op in ("shls", "shrs", "sars"):
+            t = ST if op == "sars" else VT
+            sh = "<<" if op == "shls" else ">>"
+            E(R(f"({t})({i[0]}) {sh} (({t}){{0}} + (({i[1]}) & {bits - 1}))"))
+        elif op == "cmp":
+            c = int(ca[0], 16)
+            m = {8: ("==", VT), 9: ("!=", VT), 2: ("<", ST), 3: (">=", ST), 6: (">", ST),
+                 7: ("<=", ST), 10: ("<", VT), 11: (">=", VT), 14: (">", VT), 15: ("<=", VT)}
+            if c not in m:
+                raise Unsupported(f"vec cond {c}")
+            rel, t = m[c]
+            E(R(f"({t})({i[0]}) {rel} ({t})({i[1]})"))
+        elif op == "bitsel":
+            E(R(f"(({i[0]}) & ({i[1]})) | (~({i[0]}) & ({i[2]}))"))
+        elif op in ("ssadd", "sssub", "usadd", "ussub"):
+            t = ST if op[0] == "s" else VT
+            fn = "__builtin_elementwise_add_sat" if op.endswith("add") else "__builtin_elementwise_sub_sat"
+            E(R(f"{fn}(({t})({i[0]}), ({t})({i[1]}))"))
+        elif op in ("smin", "smax", "umin", "umax"):
+            t = ST if op[0] == "s" else VT
+            fn = "__builtin_elementwise_min" if op.endswith("min") else "__builtin_elementwise_max"
+            E(R(f"{fn}(({t})({i[0]}), ({t})({i[1]}))"))
+        elif op == "aa64_sshl":
+            E(f"  {o[0]} = aot_sshl{bits}({i[0]}, {i[1]});")
+        elif op == "aa64_sli":
+            n = int(ca[0], 16)
+            E(R(f"(({VT})({i[1]}) << {n}) | (({VT})({i[0]}) & ({VT}){{0}} + ({lane})((1ull << {n}) - 1))"))
+        else:
+            raise Unsupported("vec op " + op)
 
     def gen_tb(self, tb):
         h = tb["hdr"]
@@ -106,7 +182,9 @@ class Gen:
                     return 32
                 if ty == 1:
                     return 64
-                raise Unsupported("vector temp")
+                if ty in (3, 4):
+                    return "v"
+                raise Unsupported("vector temp type %d" % ty)
             if k == "F":
                 return 64
             raise Unsupported("temp kind " + k)
@@ -115,6 +193,14 @@ class Gen:
             d = temps[t]
             k = d[0]
             w = width(t)
+            if w == "v":
+                if k in ("E", "B"):
+                    decls[t] = "aot_v128"
+                    return f"v{t}"
+                if k == "K":
+                    v = int(d[3], 16)
+                    return f"((aot_v128){{0x{v:x}ull, 0x{v:x}ull}})"
+                raise Unsupported("vector temp kind " + k)
             if k in ("E", "B"):
                 decls[t] = U[w]
                 return f"v{t}"
@@ -170,13 +256,21 @@ class Gen:
         ST = {"st8": "uint8_t", "st16": "uint16_t", "st32": "uint32_t", "st": None}
 
         for (name, p1, p2, no, ni, ta, ca) in tb["ops"]:
-            if "_" in name and name.rsplit("_", 1)[1] in ("i32", "i64"):
+            if name.endswith("_vec"):
+                self.gen_vec(name[:-4], p1, p2, no, ni, ta, ca, ex, base, E)
+                continue
+            if name in ("ext_i32_i64", "extu_i32_i64", "extrl_i64_i32", "extrh_i64_i32"):
+                op, w = name, 64
+            elif "_" in name and name.rsplit("_", 1)[1] in ("i32", "i64"):
                 op, sfx = name.rsplit("_", 1)
                 w = 32 if sfx == "i32" else 64
             else:
                 op, w = name, 64
             o = [ex(t) for t in ta[:no]]
             i = [ex(t) for t in ta[no:]]
+            if w == 32 and op not in ("call", "qemu_ld", "qemu_st") and op not in LD and op not in ST:
+                # _i32 ops see the low half of a 64-bit temp (mov_i32 from i64)
+                i = [f"(uint32_t)({x})" if width(t) == 64 else x for x, t in zip(i, ta[no:])]
             fmt = dict(u=U[w], s=S[w], m=SH[w], w=w, bi=BI[w])
             if op == "insn_start":
                 cur += 1
@@ -189,9 +283,9 @@ class Gen:
                 E(f"  {o[0]} = ({U[w]})({BIN[op].format(a=i[0], b=i[1], **fmt)});")
             elif op in UN:
                 E(f"  {o[0]} = ({U[w]})({UN[op].format(a=i[0], **fmt)});")
-            elif op == "ext" and name == "ext_i32_i64":
+            elif name == "ext_i32_i64":
                 E(f"  {o[0]} = (uint64_t)(int64_t)(int32_t)({i[0]});")
-            elif op == "extu" and name == "extu_i32_i64":
+            elif name == "extu_i32_i64":
                 E(f"  {o[0]} = (uint64_t)(uint32_t)({i[0]});")
             elif name == "extrl_i64_i32":
                 E(f"  {o[0]} = (uint32_t)({i[0]});")
@@ -303,11 +397,15 @@ class Gen:
                     vt = "uint64_t" if sz == 3 else "uint32_t"
                     E(f"  {{ uint64_t a_ = {i[1]}; uint64_t v_ = {i[0]}; uintptr_t h_ = aot_tlb(env, a_, {ofs}, 1, {sz}, {ab});")
                     E(f"    if (likely(h_)) {{ RT_JOURNAL(h_, {1 << sz}); aot_sth(h_, {sz}, {'aot_bswap(v_, %d)' % sz if bsw else 'v_'}); }}")
-                    E(f"    else {{ RT_UNSAFE(); ((void (*)(void *, uint64_t, {vt}, uint32_t, uintptr_t))"
-                      f"H({k}, {sym}))(env, a_, ({vt})v_, 0x{oi}, {ra}); }} }}")
+                    E(f"    else {{ RT_SLOW_BEGIN(); ((void (*)(void *, uint64_t, {vt}, uint32_t, uintptr_t))"
+                      f"H({k}, {sym}))(env, a_, ({vt})v_, 0x{oi}, {ra}); RT_SLOW_END(0); }} }}")
             elif op == "call":
                 hname, tm, flags, off = ca[0], int(ca[1], 16), ca[2], int(ca[3])
                 sym = "helper_" + hname
+                if self.syms is not None:
+                    if sym not in self.syms:
+                        raise Unsupported("unknown helper " + sym)
+                    off = self.syms[sym] - self.syms["aot_anchor"]
                 k = self.helper(sym, off)
                 ret = tm & 7
                 codes = []
@@ -321,9 +419,10 @@ class Gen:
                 for c in codes:
                     at.append(ctype[c])
                     if c == 7:
+                        # i128 = two call slots in (low, high) order (tmp_subindex
+                        # 0, 1 on a little-endian host); after copy propagation
+                        # they may be any i64 temps.
                         lo, hi = ta[ti], ta[ti + 1]
-                        if temps[lo][3] != "0":
-                            lo, hi = hi, lo
                         args.append(f"((__uint128_t)({ex(hi)}) << 64 | ({ex(lo)}))")
                         ti += 2
                     else:
@@ -343,14 +442,15 @@ class Gen:
                     E(f"  {callx};")
                 elif ret == 7:
                     lo, hi = ta[0], ta[1]
-                    if temps[lo][3] != "0":
-                        lo, hi = hi, lo
                     E(f"  {{ __uint128_t r_ = {callx}; {ex(lo)} = (uint64_t)r_; {ex(hi)} = (uint64_t)(r_ >> 64); }}")
                 else:
                     if no != 1:
                         raise Unsupported("call outputs")
                     E(f"  {o[0]} = ({U[width(ta[0])]}){callx};")
-            elif op in ("exit_tb", "goto_tb"):
+            elif op == "goto_tb":
+                E(f"  AOT_GOTO_TB({exitn});")
+                exitn += 1
+            elif op == "exit_tb":
                 E(f"  return R[{exitn}];")
                 exitn += 1
             elif op == "mb":
@@ -375,6 +475,17 @@ class Gen:
         return fn, "\n".join(body)
 
 
+def write_if_changed(path, text):
+    try:
+        with open(path) as f:
+            if f.read() == text:
+                return
+    except OSError:
+        pass
+    with open(path, "w") as f:
+        f.write(text)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("capture")
@@ -382,8 +493,22 @@ def main():
     ap.add_argument("--per-file", type=int, default=400)
     ap.add_argument("--max", type=int, default=0)
     ap.add_argument("--prof", help="tbprof.tsv: order/limit by execution count")
+    ap.add_argument("--qemu", help="bind helper addresses to this QEMU binary (nm)")
+    ap.add_argument("--layout-sig", help="override the layout signature (hex)")
     a = ap.parse_args()
     layout, tbs = parse(a.capture)
+    if a.layout_sig:
+        layout["sig"] = a.layout_sig
+    syms = None
+    if a.qemu:
+        import subprocess
+        syms = {}
+        for line in subprocess.run(["nm", a.qemu], capture_output=True, text=True).stdout.splitlines():
+            p = line.split()
+            if len(p) == 3 and p[1] in "tT":
+                syms[p[2][1:] if p[2].startswith("_") else p[2]] = int(p[0], 16)
+        anchor = syms["aot_anchor"]
+        layout["ldst"] = ",".join(str(syms[x] - anchor) for x in LDST_SYMS)
     if a.prof:
         rank = {}
         with open(a.prof) as f:
@@ -393,7 +518,7 @@ def main():
                     rank[p[0]] = int(p[7])
         tbs.sort(key=lambda t: -rank.get(t["hdr"]["bkey"], 0))
     os.makedirs(a.out, exist_ok=True)
-    g = Gen(layout)
+    g = Gen(layout, syms)
     good = []
     why = collections.Counter()
     seen = set()
@@ -415,11 +540,11 @@ def main():
     for j in range(0, len(good), a.per_file):
         name = f"aot_gen_{j // a.per_file:03d}.c"
         files.append(name)
-        with open(os.path.join(a.out, name), "w") as f:
-            f.write(f'#include "aot_rt.h"\n\n')
-            for tb, fn, code in good[j:j + a.per_file]:
-                f.write(f"/* pc={tb['hdr']['pc']} size={tb['hdr']['size']} icount={tb['hdr']['icount']} */\n")
-                f.write(code)
+        text = ['#include "aot_rt.h"\n\n']
+        for tb, fn, code in good[j:j + a.per_file]:
+            text.append(f"/* pc={tb['hdr']['pc']} size={tb['hdr']['size']} icount={tb['hdr']['icount']} */\n")
+            text.append(code)
+        write_if_changed(os.path.join(a.out, name), "".join(text))
     # table
     ents = sorted(good, key=lambda x: int(x[0]["hdr"]["key"], 16))
     with open(os.path.join(a.out, "aot_table.c"), "w") as f:
@@ -429,7 +554,7 @@ def main():
                 "  uint32_t nhelpers, nrt; const int64_t *helper_offs; void **helper_ptrs; void **rt_ptrs; } AotTable;\n")
         nh = len(g.helpers)
         f.write(f"void *aot_H[{nh}] __attribute__((visibility(\"hidden\")));\n")
-        f.write("void *aot_RT[4] __attribute__((visibility(\"hidden\")));\n")
+        f.write("void *aot_RT[5] __attribute__((visibility(\"hidden\")));\n")
         f.write(f"static const int64_t helper_offs[{nh}] = {{\n")
         for (sym, off), k in g.helpers.items():
             f.write(f"  {off}, /* {k} {sym} */\n")
@@ -446,11 +571,11 @@ def main():
         f.write("};\n")
         f.write("__attribute__((visibility(\"default\"))) const AotTable aot_table = {\n")
         f.write(f"  0x31544f41u, 1, {layout['page_bits']}, {len(ents)}, 0x{layout['sig']}ull, entries,\n")
-        f.write(f"  {nh}, 4, helper_offs, aot_H, aot_RT\n}};\n")
+        f.write(f"  {nh}, 5, helper_offs, aot_H, aot_RT\n}};\n")
     # ninja
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(a.out, "build.ninja"), "w") as f:
-        f.write(f"cflags = -O2 -fPIC -fvisibility=hidden -w -I{here} -DAOT_PAGE_BITS={layout['page_bits']}\n")
+        f.write(f"cflags = -O2 -fno-strict-aliasing -fwrapv -fPIC -fvisibility=hidden -w -I{here} -DAOT_PAGE_BITS={layout['page_bits']}\n")
         f.write("rule cc\n  command = clang $cflags $extra -c $in -o $out\n")
         f.write("rule link\n  command = clang -dynamiclib -o $out $in\n")
         objs, vobjs = [], []
