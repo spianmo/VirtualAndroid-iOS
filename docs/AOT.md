@@ -19,19 +19,42 @@ timestamp from `serial.log` in parentheses. The board does not have goldfish
 pipe yet, so `boot_completed` cannot be reached; surfaceflinger is the last
 milestone that every run reaches.
 
-| milestone | TCG JIT | TCTI | TCTI + AOT | AOT speedup vs TCTI |
-|---|---|---|---|---|
-| kernel `Run /init` | 1.80 (0.95) | 7.18 (3.74) | 3.60 (2.28) | 2.0x |
-| init second stage | 6.68 (6.03) | 16.94 (13.55) | 9.50 (8.10) | 1.8x |
-| start `zygote` | 69.6 (68.9) | 365.8 (362.3) | 171.7 (170.2) | 2.13x |
-| start `surfaceflinger` | 71.1 (70.3) | 383.9 (380.5) | 179.6 (178.2) | 2.14x |
+Each cell is run 1 / run 2.
+
+| milestone | TCG JIT | TCTI | TCTI+AOT v1 | + native goto_ptr | + inline LDP/STP (final) |
+|---|---|---|---|---|---|
+| kernel `Run /init` | 1.80 | 7.18 / 6.66 | 3.60 / 4.38 | 2.83 / 3.07 | 2.81 / 2.82 |
+| init second stage | 6.68 | 16.94 / 16.16 | 9.50 / 10.53 | 8.48 / 8.46 | 7.68 / 7.94 |
+| start `zygote` | 69.6 | 365.8 / 380.3 | 171.7 / 179.7 | 131.8 / 141.9 | **109.5 / 110.8** |
+| start `surfaceflinger` | 71.1 | 383.9 / 398.4 | 179.6 / 203.5 | 139.3 / 152.6 | **115.7 / 117.4** |
+| speedup vs TCTI (zygote, mean) | 5.4x | 1.0x | 2.1x | 2.7x | **3.4x** |
+
+Columns:
+- TCG JIT: guest kernel time 0.95 / 6.03 / 68.9 / 70.3 s for the four
+  milestones.
+- TCTI: run 1 is the unmodified worktree; run 2 is the AOT-capable binary
+  with no table loaded. Its numbers match run 1, so the hooks cost nothing.
+- TCTI+AOT v1: per-TB native functions and goto_tb native chaining.
 
 References: HVF reaches zygote at about 10 s guest time, and the official
-emulator (HVF) reaches `boot_completed` in 26 s. Against the TCG JIT, TCTI is
-5.2x slower and TCTI+AOT is 2.4x slower.
+emulator (HVF) reaches `boot_completed` in 26 s. TCTI is 5.4x slower than the
+TCG JIT; final TCTI+AOT is 1.6x slower than the JIT.
 
-Run data: `.logs/aot-results/{jit,tcti,tcti-aot,verify}.json`; serial logs
-are kept next to them.
+Run data and serial logs are in `.logs/aot-results/`. The final rows are
+`tcti-aot-i128{,-2}.json`.
+
+Where time goes. With macOS `sample`, 15 s around zygote preload,
+"busy" means vCPU threads not idle in WFI. These are per-function shares of
+busy vCPU samples:
+
+| configuration | i128 ld/st helpers | next-TB lookup (`helper_lookup_tb_ptr`, `cpu_get_tb_cpu_state`, qht) | native code |
+|---|---|---|---|
+| AOT v1 | ~30 % | | |
+| goto_ptr build | | ~20 % | ~17 % (the rest is softmmu slow path, GIC, locks) |
+
+The i128 helpers handle every LDP/STP of X registers, so every prologue and
+epilogue. The goto_ptr and i128 columns of the results table are the two
+fixes that followed from this profile.
 
 ## Profile of a boot (step 2)
 
@@ -163,6 +186,24 @@ Each TB becomes one C function,
   `*ra = R[ra_index]`, which is what TCTI's `GETPC()` reads.
 - `exit_tb` returns the stream address of the TB's own exit gadget, so TCTI
   produces the exact same `tb|idx` value.
+- `exit_tb` from `lookup_and_goto_ptr`: TCTI runs every TB with
+  `CF_NO_GOTO_PTR`, so every indirect branch and return used to go back to
+  `cpu_exec`. `tcg_gen_lookup_and_goto_ptr` now marks that `exit_tb`
+  (`TCGOP_FLAGS = 1`, ignored by the TCTI backend, part of the fingerprint).
+  At such sites the native code calls `aot_rt_goto_ptr`, which does the same
+  as JIT `goto_ptr`:
+  - It calls `helper_lookup_tb_ptr`.
+  - If the next TB is native, it tail-calls it.
+  - Otherwise it continues in that TB's TCTI stream.
+  - On a miss it takes the old exit.
+
+  The marker is not applied to single-step, one-insn or `CF_NO_GOTO_TB` TBs.
+  Effect: zygote 176 → 137 s.
+- `helper_ld_i128` / `helper_st_i128` (LDP/STP of X registers,
+  `MO_ATOM_IFALIGN_PAIR`) are inlined. The fast path does a 16-byte TLB
+  check (page-crossing checked) and then two 8-byte host accesses, which are
+  single-copy atomic when aligned; that is all `IFALIGN_PAIR` requires. The
+  slow path calls the same helper. Effect: 137 → 110 s.
 - `goto_tb` reads the TB's own jump slot. If that slot is chained to a TB
   that also has native code (header == `gadget_aot_enter`), the function
   tail-calls it with `musttail`. Hot loops therefore stay native without
@@ -172,14 +213,13 @@ Each TB becomes one C function,
 - Build flags: `-O2 -fno-strict-aliasing -fwrapv` (TCG freely aliases env
   with different widths).
 
-The cache from the capture boot:
-- 100,176 TBs (92k distinct bkeys, the top 100k of prof1 that were
-  translated during a TCTI boot), all supported (0 skipped)
+The final cache, from one TCTI capture boot:
+- 98,534 TBs (the top 100k bkeys of prof1 that were translated during the
+  capture boot), all supported (0 skipped)
 - 70 helpers
-- 167 MB of C
-- `libaot.dylib` 42.8 MB, of which 33.1 MB is `__text` (about 330 B per TB)
-  and 4.8 MB is the table
-- compiled in 30 s wall on 6 cores
+- `libaot.dylib` 47.6 MB: 38.1 MB `__text` (about 390 B per TB) plus a
+  4.7 MB table
+- compiled in about 30 s wall on 6 cores per variant
 
 Measured against prof1 and prof2, those bkeys cover 96.7 % and 97.3 % of all
 TB executions (99.3 % / 99.6 % of kernel executions).
@@ -234,9 +274,10 @@ Debugging aids:
      `aot_H` binding table) and drop the verify variant.
    - The table is checked against the same layout signature when the app
      starts.
-4. Size budget: about 330 B of native code plus 48 B of table per TB. A
-   100k-TB cache is about 38 MB of text; 200k TBs (99.96 % of profiled
-   executions) would be about 75 MB. 20k TBs cover 90 % for about 7.5 MB.
+4. Size budget: about 390 B of native code plus 48 B of table per TB
+   (unwind info comes on top). A 100k-TB cache is about 48 MB on disk; 200k
+   TBs (99.96 % of profiled executions) would be about 95 MB. 20k TBs cover
+   90 % for about 10 MB.
    - iOS has no limit on signed code size beyond the app's install size.
    - The hottest-first order lets us cut at whatever size we choose.
    - The cache is tied to the QEMU build (fingerprints, layout), so it has
@@ -251,16 +292,14 @@ Debugging aids:
 
 ## Limits
 
-- On a hit, the speedup per TB is bounded by the remaining non-native work:
-  - softmmu TLB lookups
-  - helpers: FP/NEON-heavy code is mostly helper calls, which are already
-    native C in TCTI
-  - leaving to the dispatcher at every `exit_tb(0)`: TCTI sets
-    `CF_NO_GOTO_PTR`, so every indirect branch and return goes through
-    `cpu_exec` and `tb_lookup`
+- Remaining overhead on hit TBs:
+  - `helper_lookup_tb_ptr` on every indirect branch (about 20 % of busy
+    time)
+  - softmmu slow paths
+  - helpers: FP/NEON/crypto stay helper calls, as in the JIT
   - cold TBs that still run as gadgets
 
-  The overall gain is 2.1x; the JIT is still 2.4x faster.
+  The overall gain is 3.4x; the JIT is still 1.6x faster.
 - Only TBs seen during profiling are covered. Code that is new to a session
   (apps, JIT) runs at TCTI speed.
 - A table is valid for one QEMU binary layout. Different CPU models or
@@ -275,10 +314,10 @@ Debugging aids:
 
 ## Next steps
 
-1. Native indirect branches: an inline `lookup_tb_ptr` with a direct tail
-   call to the target TB's native function when it has one, instead of
-   `exit_tb(0)` + `cpu_exec`. This is likely the largest remaining win:
-   returns and indirect calls are a large share of exits.
+1. Indirect branches are native already (goto_ptr). Next: a per-site inline
+   cache in `R[]`, keyed on pc plus a flags check, before calling
+   `helper_lookup_tb_ptr`, to cut the remaining ~20 %. Also return-address
+   prediction for RET.
 2. Superblocks: merge chains of hot TBs (profiled edges) into one C function
    so clang can keep guest registers in host registers across TBs.
    Correctness on an exit check or fault stays per-insn through `R[ra]`.
@@ -300,8 +339,13 @@ Debugging aids:
     varies between runs of the official emulator (see
     `reference/emulator_fullboot.log`)
 - Verification run over the whole boot to surfaceflinger
-  (`QEMU_AOT_VERIFY=4096`, `-smp 4`; reaches surfaceflinger at 215 s wall,
-  `.logs/aot-results/stats-verify.json`):
+  (`QEMU_AOT_VERIFY=4096`, `-smp 4`). The final cache is
+  `stats-verify3.json`, and it reaches surfaceflinger at 204 s wall. It
+  shows 1,353,217 executions compared and 105 mismatches in 11 TBs, all
+  loads of concurrently written words, the same classes as listed below.
+
+  The table that follows is the earlier, pre-goto_ptr cache
+  (`stats-verify.json`):
 
   | counter | value |
   |---|---|

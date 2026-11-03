@@ -71,8 +71,10 @@ def parse(path):
 
 
 class Gen:
-    def __init__(self, layout, syms=None):
+    def __init__(self, layout, syms=None, tlb_base=None, ld128_off=None):
         self.syms = syms
+        self.tlb_base = tlb_base          # TLB mask/table offset of mmu_idx 0
+        self.ld128_off = ld128_off or {}
         self.helpers = collections.OrderedDict()  # (name, off) -> index
         ldst = [int(x) for x in layout["ldst"].split(",")]
         for sym, off in zip(LDST_SYMS, ldst):
@@ -84,6 +86,41 @@ class Gen:
         if k not in self.helpers:
             self.helpers[k] = len(self.helpers)
         return self.helpers[k]
+
+    def inline_i128(self, hname, no, ni, ta, temps, ex, E, ra):
+        """Inline softmmu fast path for helper_ld_i128 / helper_st_i128 (LDP/STP
+        of X registers).  Only for MO_ATOM_IFALIGN_PAIR / MO_ATOM_NONE little
+        endian accesses, where two 8-byte host accesses (single-copy atomic
+        when 8-byte aligned) give the required atomicity.  Slow path: the
+        same helper."""
+        oit = ta[no + ni - 1]
+        d = temps[oit]
+        if d[0] != "K" or self.tlb_base is None:
+            return False
+        oi = int(d[3], 16)
+        mop, mmu = oi >> 4, oi & 15
+        if (mop & 7) != 4 or (mop & 0x10) or (mop & 0x700) not in (0x100, 0x500):
+            return False
+        a = mop & 0xe0
+        ab = 0 if a == 0 else (4 if a == 0xe0 else a >> 5)
+        ofs = self.tlb_base + 16 * mmu
+        if hname == "st_i128":
+            k = self.helper("helper_st_i128", self.ld128_off["st"])
+            addr, lo, hi = ex(ta[no + 1]), ex(ta[no + 2]), ex(ta[no + 3])
+            E(f"  {{ uint64_t a_ = {addr}, lo_ = {lo}, hi_ = {hi}; uintptr_t h_ = aot_tlb(env, a_, {ofs}, 1, 4, {ab});")
+            E(f"    if (likely(h_)) {{ RT_JOURNAL(h_, 16); memcpy((void *)h_, &lo_, 8); memcpy((void *)(h_ + 8), &hi_, 8); }}")
+            E(f"    else {{ *ra = {ra}; RT_SLOW_BEGIN(); ((void (*)(void *, uint64_t, __uint128_t, uint32_t))"
+              f"H({k}, helper_st_i128))(env, a_, (__uint128_t)hi_ << 64 | lo_, 0x{oi:x}u); RT_SLOW_END(0); }} }}")
+        else:
+            k = self.helper("helper_ld_i128", self.ld128_off["ld"])
+            addr = ex(ta[no + 1])
+            E(f"  {{ uint64_t a_ = {addr}, lo_, hi_; uintptr_t h_ = aot_tlb(env, a_, {ofs}, 0, 4, {ab});")
+            E(f"    if (likely(h_)) {{ memcpy(&lo_, (void *)h_, 8); memcpy(&hi_, (void *)(h_ + 8), 8); }}")
+            E(f"    else {{ *ra = {ra}; RT_SLOW_BEGIN(); __uint128_t r_ = ((__uint128_t (*)(void *, uint64_t, uint32_t))"
+              f"H({k}, helper_ld_i128))(env, a_, 0x{oi:x}u); lo_ = (uint64_t)r_; hi_ = (uint64_t)(r_ >> 64);"
+              f" RT_SLOW_END(aot_tlb(env, a_, {ofs}, 0, 4, {ab}) != 0); }}")
+            E(f"    {ex(ta[0])} = lo_; {ex(ta[1])} = hi_; }}")
+        return True
 
     def gen_vec(self, op, ty, vece, no, ni, ta, ca, ex, base, E):
         if ty not in (3, 4):
@@ -399,6 +436,9 @@ class Gen:
                     E(f"    if (likely(h_)) {{ RT_JOURNAL(h_, {1 << sz}); aot_sth(h_, {sz}, {'aot_bswap(v_, %d)' % sz if bsw else 'v_'}); }}")
                     E(f"    else {{ RT_SLOW_BEGIN(); ((void (*)(void *, uint64_t, {vt}, uint32_t, uintptr_t))"
                       f"H({k}, {sym}))(env, a_, ({vt})v_, 0x{oi}, {ra}); RT_SLOW_END(0); }} }}")
+            elif op == "call" and ca[0] in ("ld_i128", "st_i128") and self.inline_i128(
+                    ca[0], no, ni, ta, temps, ex, E, f"R[{RA + max(cur, 0)}]"):
+                pass
             elif op == "call":
                 hname, tm, flags, off = ca[0], int(ca[1], 16), ca[2], int(ca[3])
                 sym = "helper_" + hname
@@ -499,6 +539,7 @@ def main():
     ap.add_argument("--prof", help="tbprof.tsv: order/limit by execution count")
     ap.add_argument("--qemu", help="bind helper addresses to this QEMU binary (nm)")
     ap.add_argument("--layout-sig", help="override the layout signature (hex)")
+    ap.add_argument("--no-inline-i128", action="store_true")
     a = ap.parse_args()
     layout, tbs = parse(a.capture)
     if a.layout_sig:
@@ -522,7 +563,23 @@ def main():
                     rank[p[0]] = int(p[7])
         tbs.sort(key=lambda t: -rank.get(t["hdr"]["bkey"], 0))
     os.makedirs(a.out, exist_ok=True)
-    g = Gen(layout, syms)
+    # TLB table offset per mmu_idx (16-byte CPUTLBDescFast), from the ldst ops
+    tlb_base = None
+    ld128_off = {}
+    for tb in tbs:
+        for (name, p1, p2, no, ni, ta, ca) in tb["ops"]:
+            if name.startswith("qemu_ld") or name.startswith("qemu_st"):
+                tlb_base = int(ca[1]) - 16 * int(ca[6])
+            elif name == "call" and ca[0] in ("ld_i128", "st_i128"):
+                ld128_off[ca[0][:2]] = int(ca[3])
+        if tlb_base is not None and len(ld128_off) == 2:
+            break
+    if syms is not None:
+        for kk in ("ld", "st"):
+            ld128_off[kk] = syms[f"helper_{kk}_i128"] - syms["aot_anchor"]
+    if a.no_inline_i128:
+        tlb_base = None
+    g = Gen(layout, syms, tlb_base, ld128_off)
     good = []
     why = collections.Counter()
     seen = set()
