@@ -32,18 +32,34 @@ final class QemuEngine: VMEngine {
         return FileManager.default.fileExists(atPath: path) ? path : nil
     }
 
-    /// Picks the QEMU build that can run in this process.
+    /// TCG backend of the embedded QEMU slice ("tcg" = JIT, "tcti"), written
+    /// by scripts/embed_engine_frameworks.sh from qemu-backends.txt.
+    static var embeddedBackend: String? {
+        guard let url = Bundle.main.url(forResource: "VAEngineBackend", withExtension: "txt"),
+              let s = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Picks the QEMU build that can run in this process, or nil.
     static func selectFramework() -> (path: String, accel: AccelMode)? {
         let jit = va_runtime_jit_available()
-        if jit, let p = frameworkBinary(jitFramework) {
-            return (p, .tcgJIT(splitWX: !va_runtime_is_simulator()))
+        let splitWX = !va_runtime_is_simulator()
+        if !jit, let p = frameworkBinary(tctiFramework) { return (p, .tcti) }
+        if let p = frameworkBinary(jitFramework) {
+            switch embeddedBackend {
+            case "tcti": return (p, .tcti)
+            default: return jit ? (p, .tcgJIT(splitWX: splitWX)) : nil    // a JIT build needs JIT
+            }
         }
         if let p = frameworkBinary(tctiFramework) { return (p, .tcti) }
-        if let p = frameworkBinary(jitFramework) {
-            // No JIT on this device: only works if this build's TCG backend is TCTI.
-            return (p, jit ? .tcgJIT(splitWX: !va_runtime_is_simulator()) : .tcti)
-        }
         return nil
+    }
+
+    static var unavailableReason: String {
+        if frameworkBinary(jitFramework) == nil && frameworkBinary(tctiFramework) == nil {
+            return "\(jitFramework).framework is not embedded"
+        }
+        return "the embedded QEMU is a JIT (tcg) build but this process cannot JIT; attach a debugger or embed the TCTI build"
     }
 
     static var gfxLibraryPath: String? {
@@ -57,12 +73,38 @@ final class QemuEngine: VMEngine {
 
     static var isAvailable: Bool { selectFramework() != nil }
 
+    private static let glesVersionKey = "VAGlesVersion"
+
+    /// GLES version the renderer offers, via va_gfx_get_gles_version()
+    /// (documented as valid after va_gfx_init, which QEMU calls later; so a
+    /// value seen in an earlier run is cached and used for the bootconfig).
+    static func queryGlesVersion() -> (Int32, Int32)? {
+        guard let path = gfxLibraryPath, let h = dlopen(path, RTLD_NOW | RTLD_LOCAL),
+              let sym = dlsym(h, "va_gfx_get_gles_version") else { return nil }
+        typealias Fn = @convention(c) (UnsafeMutablePointer<Int32>?, UnsafeMutablePointer<Int32>?) -> Int32
+        var major: Int32 = 0, minor: Int32 = 0
+        guard unsafeBitCast(sym, to: Fn.self)(&major, &minor) == 0, major >= 2 else { return nil }
+        UserDefaults.standard.set(Int((major << 16) | minor), forKey: glesVersionKey)
+        return (major, minor)
+    }
+
+    /// androidboot.* overrides for this host (bootconfig in the initrd).
+    static func bootOverrides(config: VMLaunchConfig) -> [String: String] {
+        var o = ["androidboot.qemu.skin": "\(config.displayWidth)x\(config.displayHeight)"]
+        if let (major, minor) = queryGlesVersion() {
+            o["androidboot.opengles.version"] = "\((major << 16) | minor)"
+        } else if let cached = UserDefaults.standard.object(forKey: glesVersionKey) as? Int {
+            o["androidboot.opengles.version"] = "\(cached)"
+        }
+        return o
+    }
+
     // MARK: Lifecycle
 
     func start(config: VMLaunchConfig, host: HostBridge, frames: FrameSink) throws {
         guard let storage = config.storage else { throw EngineError.imageMissing("no storage") }
         guard let (path, accel) = Self.selectFramework() else {
-            throw EngineError.frameworkMissing("\(Self.jitFramework).framework is not embedded")
+            throw EngineError.frameworkMissing(Self.unavailableReason)
         }
         let runner: VAQemuRunner
         do {
@@ -90,7 +132,7 @@ final class QemuEngine: VMEngine {
 
         // Frames: needs the (proposed) present hook, see README "Engine integration".
         let gfx = Self.gfxLibraryPath
-        if let gfx { runner.resolvePresentCallback(fromLibrary: gfx) }
+        if let gfx { _ = runner.resolvePresentCallback(fromLibrary: gfx) }
         syms = runner.symbols
         symbols = syms
         if let setPresent = syms.set_present_callback {
@@ -112,6 +154,7 @@ final class QemuEngine: VMEngine {
         self.qmp = qmp
 
         var builder = QemuArgumentBuilder(
+            machine: config.machine,
             accel: accel,
             cpuCount: config.cpuCount,
             memoryMB: config.memoryMB,
@@ -188,7 +231,10 @@ final class QemuEngine: VMEngine {
 
     private func guestStateChanged(_ state: VaGuestState) {
         guestState = state
-        if state == VA_GUEST_BOOT_COMPLETED { progress?.stop() }
+        if state == VA_GUEST_BOOT_COMPLETED {
+            progress?.stop()
+            _ = Self.queryGlesVersion()   // renderer initialized by now: cache for the next bootconfig
+        }
         delegate?.engine(self, guestStateChanged: state)
     }
 

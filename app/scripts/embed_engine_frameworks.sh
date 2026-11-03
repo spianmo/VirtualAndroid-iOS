@@ -47,6 +47,7 @@ for xc in "$SRC"/*.xcframework; do
     echo "warning: $(basename "$xc") has no arm64 ${want} slice, skipped"
     continue
   fi
+  [[ $(basename "$xc") == qemu-aarch64-softmmu.xcframework ]] && qemu_slice=$(basename "$slice")
   for item in "$slice"/*.framework "$slice"/*.dylib; do
     name=$(basename "$item")
     rm -rf "${DEST:?}/$name"
@@ -59,4 +60,12 @@ for xc in "$SRC"/*.xcframework; do
     count=$((count + 1))
   done
 done
+# Record which TCG backend the embedded QEMU slice was built with (tcg = JIT,
+# tcti = threaded interpreter) so the app picks matching -accel options.
+BACKEND_FILE="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/VAEngineBackend.txt"
+rm -f "$BACKEND_FILE"
+if [[ -f "$SRC/qemu-backends.txt" && -n "${qemu_slice:-}" ]]; then
+  backend=$(awk -F: -v s="$qemu_slice" '{gsub(/ /,"",$1); gsub(/ /,"",$2); if ($1==s) print $2}' "$SRC/qemu-backends.txt")
+  [[ -n "$backend" ]] && echo "$backend" > "$BACKEND_FILE" && echo "QEMU slice $qemu_slice backend: $backend"
+fi
 echo "embedded $count engine framework(s) from $SRC into $DEST"

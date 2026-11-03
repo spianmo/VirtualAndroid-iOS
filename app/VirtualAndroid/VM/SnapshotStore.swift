@@ -38,7 +38,7 @@ struct SnapshotStore {
 
     /// A snapshot is only valid for the exact image + machine configuration.
     static func fingerprint(storage: VMStorage, config: VMLaunchConfig, engine: String) -> String {
-        var parts = [engine, "\(config.memoryMB)", "\(config.cpuCount)", "\(config.displayWidth)x\(config.displayHeight)"]
+        var parts = [engine, config.machine, "\(config.memoryMB)", "\(config.cpuCount)", "\(config.displayWidth)x\(config.displayHeight)"]
         for url in [storage.kernel, storage.system, storage.vendor, storage.ramdisk] {
             let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
             let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0

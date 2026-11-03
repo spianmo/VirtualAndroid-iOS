@@ -62,6 +62,8 @@ struct VMLaunchConfig {
     /// Paths/argv only used by the QEMU engine.
     var storage: VMStorage?
     var restoreSnapshotTag: String?
+    /// QEMU machine; "ranchu" (board) or "virt" for frameworks without it.
+    var machine = "ranchu"
 }
 
 enum EngineError: LocalizedError {

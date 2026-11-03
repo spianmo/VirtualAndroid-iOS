@@ -1,6 +1,7 @@
 // Runtime glue for the real engine: loads the QEMU framework with dlopen,
 // resolves the va_host.h symbols and runs qemu_init/qemu_main_loop/qemu_cleanup
 // on a dedicated pthread, intercepting exit() like UTM (UTMProcess.m).
+// Environment variables are applied with setenv() before qemu_init.
 #ifndef VA_ENGINE_RUNTIME_H
 #define VA_ENGINE_RUNTIME_H
 
@@ -13,10 +14,11 @@ NS_ASSUME_NONNULL_BEGIN
 /* Engine entry points resolved from the framework. Any may be NULL if the
  * framework does not export it; callers must check. */
 typedef struct VAEngineSymbols {
-    int (*_Nullable qemu_init)(int argc, const char *_Nullable *_Nullable argv,
-                               const char *_Nullable *_Nullable envp);
-    void (*_Nullable qemu_main_loop)(void);
-    void (*_Nullable qemu_cleanup)(void);
+    /* QEMU 10 signatures (include/system/system.h of our tree; UTM's older
+     * fork had int qemu_init(argc, argv, envp)). qemu_init() exits on error. */
+    void (*_Nullable qemu_init)(int argc, char *_Nullable *_Nullable argv);
+    int (*_Nullable qemu_main_loop)(void);
+    void (*_Nullable qemu_cleanup)(int status);
 
     void (*_Nullable host_set_callbacks)(const VaHostCallbacks *_Nonnull callbacks);
     void (*_Nullable sensor_event)(VaSensorType type, const float *_Nonnull values,

@@ -98,9 +98,7 @@ static void *va_qemu_thread_main(void *arg)
     VAQemuRunner *self = (__bridge_transfer VAQemuRunner *)arg;
     pthread_setname_np("qemu-main");
 
-    NSMutableArray<NSString *> *envStrings = [NSMutableArray array];
     [self->_env enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSString *v, BOOL *stop) {
-        [envStrings addObject:[NSString stringWithFormat:@"%@=%@", k, v]];
         setenv(k.UTF8String, v.UTF8String, 1);
     }];
     setenv("TMPDIR", NSFileManager.defaultManager.temporaryDirectory.path.fileSystemRepresentation, 1);
@@ -108,24 +106,18 @@ static void *va_qemu_thread_main(void *arg)
         chdir(self->_cwd.fileSystemRepresentation);
     }
 
-    NSUInteger envc = envStrings.count;
-    const char **envp = calloc(envc + 1, sizeof(char *));
-    for (NSUInteger i = 0; i < envc; i++) {
-        envp[i] = strdup(envStrings[i].UTF8String);
-    }
     int argc = (int)self->_argv.count + 1;
-    const char **argv = calloc((size_t)argc + 1, sizeof(char *));
-    argv[0] = "qemu-system-aarch64";
+    char **argv = calloc((size_t)argc + 1, sizeof(char *));
+    argv[0] = strdup("qemu-system-aarch64");
     for (int i = 1; i < argc; i++) {
         argv[i] = strdup(self->_argv[(NSUInteger)i - 1].UTF8String);
     }
 
-    int ret = self->_symbols.qemu_init(argc, argv, envp);
-    if (ret == 0) {
-        self->_symbols.qemu_main_loop();
-        self->_symbols.qemu_cleanup();
-    }
-    self->_status = ret;
+    /* Returns with the BQL held; exit()s (intercepted below) on bad options. */
+    self->_symbols.qemu_init(argc, argv);
+    int status = self->_symbols.qemu_main_loop();
+    self->_symbols.qemu_cleanup(status);
+    self->_status = status;
     dispatch_semaphore_signal(self->_done);
     return NULL;
 }

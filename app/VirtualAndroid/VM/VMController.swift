@@ -61,6 +61,8 @@ final class VMController: ObservableObject, EngineDelegate {
         static let engine = "VAEngine", autoBoot = "VAAutoBoot", quickBoot = "VAQuickBoot"
         static let rotation = "VARotationMode", clipboard = "VAClipboardAutoSync"
         static let background = "VAKeepRunningInBackground", nav = "VANavControls", navExpanded = "VANavExpanded"
+        // Developer overrides (launch arguments, e.g. `-VAMachine virt -VAAutoStopAfter 90`).
+        static let machine = "VAMachine", autoStopAfter = "VAAutoStopAfter"
     }
 
     init() {
@@ -109,7 +111,7 @@ final class VMController: ObservableObject, EngineDelegate {
             }
             return "QEMU framework present · \(accel)"
         }
-        return "QEMU framework not embedded (stub only)"
+        return "QEMU unavailable: \(QemuEngine.unavailableReason)"
     }
 
     var stubDiagnostics: StubDiagnostics? { engine as? StubDiagnostics }
@@ -123,9 +125,18 @@ final class VMController: ObservableObject, EngineDelegate {
 
     // MARK: Launch
 
+    /// First run: install a found image pack automatically, then auto-boot.
     func launchIfNeeded() {
         guard !didAutoBoot else { return }
         didAutoBoot = true
+        if !imageInstalled, let pack = packLocation, engineKind != .stub {
+            log(1, "first run: installing image pack from \(pack.path)")
+            installImagePack(from: pack) { [weak self] ok in
+                guard let self, ok, self.autoBoot else { return }
+                self.boot()
+            }
+            return
+        }
         if autoBoot, resolvedEngineKind == .stub || imageInstalled {
             boot()
         }
@@ -140,6 +151,7 @@ final class VMController: ObservableObject, EngineDelegate {
         let kind = resolvedEngineKind
         var cfg = VMLaunchConfig()
         cfg.storage = storage
+        if let machine = defaults.string(forKey: Keys.machine), !machine.isEmpty { cfg.machine = machine }
         let engineName = kind == .qemu ? "qemu" : "stub"
 
         let snapshots = SnapshotStore(url: storage.snapshotMetadata)
@@ -165,7 +177,7 @@ final class VMController: ObservableObject, EngineDelegate {
                 return
             }
             do {
-                try storage.prepareVM(bootOverrides: [:])
+                try storage.prepareVM(bootOverrides: QemuEngine.bootOverrides(config: cfg))
             } catch {
                 fail(error.localizedDescription)
                 return
@@ -200,7 +212,15 @@ final class VMController: ObservableObject, EngineDelegate {
         bootStart = Date()
         phase = .booting
         newEngine.setDisplayRotation(androidRotation)
-        log(1, "booting with \(newEngine.displayName) engine")
+        log(1, "booting with \(newEngine.displayName) engine (machine \(cfg.machine))")
+        let stopAfter = defaults.double(forKey: Keys.autoStopAfter)
+        if stopAfter > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter) { [weak self, weak newEngine] in
+                guard let self, let newEngine, self.engine === newEngine else { return }
+                self.log(1, "VAAutoStopAfter \(stopAfter)s: stopping")
+                newEngine.forceStop()
+            }
+        }
     }
 
     func pause() {
@@ -264,7 +284,8 @@ final class VMController: ObservableObject, EngineDelegate {
 
     // MARK: Image setup
 
-    func installImagePack(from url: URL? = nil, securityScoped: Bool = false) {
+    func installImagePack(from url: URL? = nil, securityScoped: Bool = false,
+                          completion: ((Bool) -> Void)? = nil) {
         guard let source = url ?? storage.findPack() else {
             fail("No image pack found. Put one in Documents/\(VMStorage.imagePackFolderName) (see README).")
             return
@@ -294,11 +315,13 @@ final class VMController: ObservableObject, EngineDelegate {
                     self.phase = .idle
                     self.refreshImageState()
                     self.log(1, "image installed from \(source.path)")
+                    completion?(true)
                 }
             } catch {
                 await MainActor.run {
                     self.phase = .idle
                     self.fail(error.localizedDescription)
+                    completion?(false)
                 }
             }
         }

@@ -37,7 +37,6 @@ final class MetalDisplayView: UIView, FrameSink {
     private var pendingFrame: DisplayFrame?
     private var currentFrame: DisplayFrame?
     private var needsRedraw = true
-    private var textureCache: [IOSurfaceID: MTLTexture] = [:]
     private var copyTexture: MTLTexture?        // fallback when IOSurface textures are unsupported
     private var ioSurfaceTexturesWork = true
 
@@ -65,6 +64,10 @@ final class MetalDisplayView: UIView, FrameSink {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit {
+        displayLink?.invalidate()
+    }
 
     func setGuestSize(width: Int, height: Int) {
         contentSize = CGSize(width: width, height: height)
@@ -194,14 +197,14 @@ final class MetalDisplayView: UIView, FrameSink {
         let surface = frame.surface
         let format = Self.metalFormat(surface)
         if ioSurfaceTexturesWork {
-            let id = IOSurfaceGetID(surface)
-            if let t = textureCache[id], t.width == frame.width, t.height == frame.height { return t }
+            // Wrap per draw and never cache: an IOSurface-backed texture keeps
+            // the surface retained/in use, and libva_gfx only recycles
+            // surfaces nobody else holds. The command buffer keeps the texture
+            // alive until the GPU is done with it.
             let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: frame.width,
                                                                 height: frame.height, mipmapped: false)
             desc.usage = .shaderRead
             if let t = device.makeTexture(descriptor: desc, iosurface: surface, plane: 0) {
-                if textureCache.count > 8 { textureCache.removeAll() }
-                textureCache[id] = t
                 return t
             }
             ioSurfaceTexturesWork = false
