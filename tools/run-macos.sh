@@ -2,7 +2,15 @@
 # Boot the Android 13 image in our QEMU on macOS (HVF) for development.
 #
 #   tools/run-macos.sh [--fresh] [--tcg] [--machine virt|ranchu] [--display] [--timeout SECS]
-#                      [--name RUN] [--adb-port PORT] [-- extra qemu args]
+#                      [--name RUN] [--adb-port PORT] [--trace PATTERN]... [--console]
+#                      [-- extra qemu args]
+#
+# --machine ranchu (the Android emulator board: virt + goldfish pipe/sync/battery/events,
+# virtio multitouch + "qwerty2" keyboard) also enables the android_pipe_connect trace, so
+# every pipe service the guest opens is logged to qemu.out. --trace adds more QEMU trace
+# event patterns (e.g. --trace 'goldfish_*'). --console makes the kernel console (where
+# the image runs a root-capable 'console' shell) a unix socket, $RUN/console.sock, still
+# logged to serial.log; talk to it with e.g. `nc -U engine/run/<name>/console.sock`.
 #   QEMU=/path/to/qemu-system-aarch64 overrides the binary (each agent uses its own build dir).
 #
 # Per-run state lives in engine/run/<name> (default "dev"): writable disks,
@@ -14,6 +22,7 @@ QEMU=${QEMU:-$ROOT/engine/build-macos/qemu-system-aarch64}
 QEMU_IMG=${QEMU_IMG:-$ROOT/engine/build-macos/qemu-img}
 E2=$(brew --prefix e2fsprogs)/sbin
 NAME=dev FRESH=0 ACCEL=hvf MACHINE=virt DISPLAY_OPT=(-display none) TIMEOUT=0 ADB_PORT=5555
+TRACES=() CONSOLE=0
 while (( $# )); do
   case $1 in
     --fresh) FRESH=1 ;;
@@ -23,6 +32,8 @@ while (( $# )); do
     --display) DISPLAY_OPT=(-display cocoa) ;;
     --timeout) TIMEOUT=$2; shift ;;
     --adb-port) ADB_PORT=$2; shift ;;
+    --trace) TRACES+=($2); shift ;;
+    --console) CONSOLE=1 ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -37,13 +48,22 @@ if (( FRESH )) || [[ ! -f $RUN/userdata.img ]]; then
   mkfile -n 64m $RUN/cache.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L cache $RUN/cache.img
 fi
 [[ -f $RUN/initrd ]] || python3 -I $ROOT/tools/make_initrd.py $IMG/ramdisk.img $RUN/initrd
-rm -f $RUN/serial.log $RUN/logcat.log $RUN/hvc0.log
+rm -f $RUN/serial.log $RUN/logcat.log $RUN/hvc0.log $RUN/console.sock
+SERIAL_OPT=(-serial file:$RUN/serial.log)
+if (( CONSOLE )); then
+  SERIAL_OPT=(-chardev socket,id=ser0,path=$RUN/console.sock,server=on,wait=off,logfile=$RUN/serial.log
+              -serial chardev:ser0)
+fi
+
+[[ $MACHINE == ranchu* ]] && TRACES=(android_pipe_connect $TRACES)
+TRACE_OPT=()
+for t in $TRACES; do TRACE_OPT+=(-trace "enable=$t"); done
 
 if [[ $ACCEL == hvf ]]; then CPU=(-accel hvf -cpu host); else CPU=(-accel tcg,thread=multi,tb-size=1024 -cpu cortex-a76); fi
 
 ARGS=(
   -M $MACHINE $CPU -smp 4 -m 2048 -nodefaults $DISPLAY_OPT
-  -serial file:$RUN/serial.log -monitor unix:$RUN/monitor.sock,server,nowait
+  $SERIAL_OPT -monitor unix:$RUN/monitor.sock,server,nowait
   -kernel $IMG/kernel-ranchu -initrd $RUN/initrd
   -append "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 printk.devkmsg=on bootconfig"
   # Order matters: it fixes the virtio-mmio addresses the image's fstab expects.
@@ -56,6 +76,7 @@ ARGS=(
   -device virtio-rng-device
   -chardev file,id=forhvc0,path=$RUN/hvc0.log -chardev file,id=forhvc1,path=$RUN/logcat.log
   -device virtio-serial-pci,ioeventfd=off -device virtconsole,chardev=forhvc0 -device virtconsole,chardev=forhvc1
+  $TRACE_OPT
   "$@"
 )
 echo "run dir: $RUN"
