@@ -62,6 +62,18 @@ xcrun simctl spawn booted $PWD/gfx/build-ios-sim/tests/va_gfx_harness \
 
 ## What the engine (ranchu machine) must do
 
+Shortcut: `integration/ranchu_gfx.{c,h}` implements steps 2-3 below as a
+drop-in for `engine/qemu/hw/android/` (syntax-checked against the real tree with
+`integration/check-syntax.sh`). The machine then only needs:
+
+```c
+#include "ranchu_gfx.h"            /* add gfx/include to the include path */
+RanchuGfxOptions o = { .width = 1080, .height = 2340, .dpi = 440, .refresh_hz = 60 };
+if (ranchu_gfx_init(&o, present_cb, opaque)) {               /* in ranchu_init() */
+    /* bootconfig: androidboot.opengles.version = ranchu_gfx_opengles_version() */
+}
+```
+
 ### 1. Ship the libraries
 
 * macOS: `libva_gfx.dylib` and `libGLESv2.dylib` (ANGLE) in the same directory
