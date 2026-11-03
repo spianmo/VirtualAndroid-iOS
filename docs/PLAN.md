@@ -40,7 +40,7 @@ iOS App：点开即进入完整的 Android 13（AOSP，arm64）桌面。整机�
   开机请求的服务清单见 `docs/pipe-services-requested.md`。
 - 渲染器 ANGLE Metal 上报 GLES 3.0，所以 bootconfig 要设 `androidboot.opengles.version=196608`（官方 swangle 是 196609）。
   以 bootconfig 为准，qemud boot-properties 不再发这个属性。
-- HVF 下 ranchu 整机快照（`migrate` 存到文件再 `-incoming` 恢复）可用：打开着的 pingpong 管道及其中未读数据恢复后都还在。
+- HVF 下 ranchu 整机快照（`migrate` 存到文件再 `-incoming` 恢复）可用（这是加渲染器和 address_space 之前测的，之后未复测）：打开着的 pingpong 管道及其中未读数据恢复后都还在。
   注意不要在 VM 暂停时往串口灌输入。
 
 ## 架构
