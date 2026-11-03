@@ -80,10 +80,12 @@ iOS App：点开即进入完整的 Android 13（AOSP，arm64）桌面。整机�
 
 ## 里程碑
 - **M0 环境** ✅ 磁盘、iOS 26.1 模拟器运行时、镜像、QEMU 基线、macOS HVF 构建。
-- **M1 macOS 上开机**：ranchu 主板 + goldfish pipe + qemud 服务 + gfxstream(macOS)，
-  在我们的 QEMU 里 `sys.boot_completed=1` 且能看到桌面（Cocoa 窗口或截图）。
-- **M2 iOS 模拟器里开机**：QEMU 以 framework 形式跑在 App 进程内（TCG JIT），Metal 显示，触控可用。
-- **M3 硬件桥接**：传感器、定位、电池、音频输出/麦克风、剪贴板、网络、相机。
+- **M1 macOS 上开机** ✅ ranchu 主板 + goldfish pipe/sync/battery/events/address_space + qemud/vsock 服务 + libva_gfx（gfxstream→ANGLE Metal）。
+  HVF 下客户机 13.9 s 到 `sys.boot_completed=1`，进桌面持续渲染无 watchdog（`docs/home-screen.png`）。
+- **M2 iOS 模拟器里开机** ✅ App 进程内跑 QEMU（TCG JIT）+ libva_gfx，Metal 显示真实桌面，UIKit 点按/HOME/BACK 到达客户机。
+  首启（装镜像+新 userdata）约 187 s 进桌面，之后约 70–80 s 到 boot_completed（`app/docs/screenshot-real-home.png`）。
+- **M3 硬件桥接**（大部分完成）：传感器/GPS/指纹/剪贴板/相机 v0/电池/触控/按键协议已通；待用真实 HAL 端到端复测相机、GNSS、
+  剪贴板，音频（virtio-snd）未接，振动无客户机通路。
 - **M4 秒开**：首启建盘、整机快照保存/恢复，冷启动之后再开 App 几秒进桌面。
 - **M5 真机无 JIT 性能**：TCTI 构建 + AOT 翻译缓存（离线录制热点 TB → 编译成签名代码 → 运行时按内容哈希命中）。
 - **M6 真机**：签名、权限、内存权限、iPhone 实测（需要 Apple 开发者账号）。
