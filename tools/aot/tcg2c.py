@@ -451,7 +451,11 @@ class Gen:
                 E(f"  AOT_GOTO_TB({exitn});")
                 exitn += 1
             elif op == "exit_tb":
-                E(f"  return R[{exitn}];")
+                if p2 == 1:
+                    # lookup_and_goto_ptr exit (TCTI marks it, see tcg-op.c)
+                    E(f"  AOT_GOTO_PTR({exitn});")
+                else:
+                    E(f"  return R[{exitn}];")
                 exitn += 1
             elif op == "mb":
                 bar = int(ca[0], 16) & 0xf
@@ -554,7 +558,7 @@ def main():
                 "  uint32_t nhelpers, nrt; const int64_t *helper_offs; void **helper_ptrs; void **rt_ptrs; } AotTable;\n")
         nh = len(g.helpers)
         f.write(f"void *aot_H[{nh}] __attribute__((visibility(\"hidden\")));\n")
-        f.write("void *aot_RT[5] __attribute__((visibility(\"hidden\")));\n")
+        f.write("void *aot_RT[6] __attribute__((visibility(\"hidden\")));\n")
         f.write(f"static const int64_t helper_offs[{nh}] = {{\n")
         for (sym, off), k in g.helpers.items():
             f.write(f"  {off}, /* {k} {sym} */\n")
@@ -571,7 +575,7 @@ def main():
         f.write("};\n")
         f.write("__attribute__((visibility(\"default\"))) const AotTable aot_table = {\n")
         f.write(f"  0x31544f41u, 1, {layout['page_bits']}, {len(ents)}, 0x{layout['sig']}ull, entries,\n")
-        f.write(f"  {nh}, 5, helper_offs, aot_H, aot_RT\n}};\n")
+        f.write(f"  {nh}, 6, helper_offs, aot_H, aot_RT\n}};\n")
     # ninja
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(a.out, "build.ninja"), "w") as f:

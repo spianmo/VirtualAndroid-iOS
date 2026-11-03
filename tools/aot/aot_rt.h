@@ -79,6 +79,17 @@ extern void *aot_RT[] __attribute__((visibility("hidden")));
 #endif
 
 /*
+ * exit_tb from lookup_and_goto_ptr: let QEMU look up the next TB and
+ * continue there (natively when it has AOT code); R[k] on a miss.
+ */
+#if defined(AOT_VERIFY) || defined(AOT_NO_CHAIN)
+#define AOT_GOTO_PTR(k) return R[k]
+#else
+#define AOT_GOTO_PTR(k) \
+    __attribute__((musttail)) return ((aot_fn_t)aot_RT[5])(env_, (const uintptr_t *)R[k], ra)
+#endif
+
+/*
  * Softmmu TLB fast path, same test as the aarch64 JIT backend:
  * comparator == (addr [+ s_mask - a_mask]) & (page_mask | a_mask).
  * Returns the host address or 0 (miss, MMIO, watchpoint, misalignment...).
