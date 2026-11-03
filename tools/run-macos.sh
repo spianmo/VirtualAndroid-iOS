@@ -1,7 +1,9 @@
 #!/bin/zsh
 # Boot the Android 13 image in our QEMU on macOS (HVF) for development.
 #
-#   tools/run-macos.sh [--fresh] [--tcg] [--machine virt|ranchu] [--display] [--timeout SECS] [-- extra qemu args]
+#   tools/run-macos.sh [--fresh] [--tcg] [--machine virt|ranchu] [--display] [--timeout SECS]
+#                      [--name RUN] [--adb-port PORT] [-- extra qemu args]
+#   QEMU=/path/to/qemu-system-aarch64 overrides the binary (each agent uses its own build dir).
 #
 # Per-run state lives in engine/run/<name> (default "dev"): writable disks,
 # serial.log (kernel console), logcat.log (androidboot.logcat on hvc1).
@@ -11,7 +13,7 @@ IMG=$ROOT/images/android-33/arm64-v8a
 QEMU=${QEMU:-$ROOT/engine/build-macos/qemu-system-aarch64}
 QEMU_IMG=${QEMU_IMG:-$ROOT/engine/build-macos/qemu-img}
 E2=$(brew --prefix e2fsprogs)/sbin
-NAME=dev FRESH=0 ACCEL=hvf MACHINE=virt DISPLAY_OPT=(-display none) TIMEOUT=0
+NAME=dev FRESH=0 ACCEL=hvf MACHINE=virt DISPLAY_OPT=(-display none) TIMEOUT=0 ADB_PORT=5555
 while (( $# )); do
   case $1 in
     --fresh) FRESH=1 ;;
@@ -20,6 +22,7 @@ while (( $# )); do
     --name) NAME=$2; shift ;;
     --display) DISPLAY_OPT=(-display cocoa) ;;
     --timeout) TIMEOUT=$2; shift ;;
+    --adb-port) ADB_PORT=$2; shift ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -49,7 +52,7 @@ ARGS=(
   -drive index=2,id=userdata,if=none,file=$RUN/userdata.img,format=raw -device virtio-blk-device,drive=userdata
   -drive index=3,id=cache,if=none,file=$RUN/cache.img,format=raw -device virtio-blk-device,drive=cache
   -drive index=4,id=system,if=none,file=$IMG/system.img,read-only=on,format=raw -device virtio-blk-device,drive=system
-  -netdev user,id=mynet,hostfwd=tcp:127.0.0.1:5555-:5555 -device virtio-net-device,netdev=mynet
+  -netdev user,id=mynet,hostfwd=tcp:127.0.0.1:$ADB_PORT-:5555 -device virtio-net-device,netdev=mynet
   -device virtio-rng-device
   -chardev file,id=forhvc0,path=$RUN/hvc0.log -chardev file,id=forhvc1,path=$RUN/logcat.log
   -device virtio-serial-pci,ioeventfd=off -device virtconsole,chardev=forhvc0 -device virtconsole,chardev=forhvc1

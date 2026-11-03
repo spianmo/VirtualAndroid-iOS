@@ -11,3 +11,4 @@ app/build/
 *.xcarchive
 DerivedData/
 .DS_Store
+engine/qemu-*/
