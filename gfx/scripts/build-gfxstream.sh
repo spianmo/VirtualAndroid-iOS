@@ -8,7 +8,9 @@ SRC="$GFX/src/gfxstream"
 OUT="$GFX/build-$PLATFORM"
 PREFIX="$OUT/prefix"
 CROSS=()
-if [ "$PLATFORM" != "macos" ]; then
+if [ "$PLATFORM" = "macos" ]; then
+  export MACOSX_DEPLOYMENT_TARGET=13.0
+else
   CROSS+=(--cross-file "$OUT/meson-cross.ini")
 fi
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"

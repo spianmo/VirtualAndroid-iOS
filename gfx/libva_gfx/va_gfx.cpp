@@ -6,12 +6,14 @@
 //
 // Threading contract (see gfx/README.md):
 //  * Engine -> libva_gfx pipe callbacks arrive with the BQL held.
-//  * libva_gfx -> engine calls (pipe_host_signal_wake, pipe_host_close,
-//    sync_timeline_inc) are always made with the BQL held: either directly
+//  * libva_gfx -> engine pipe calls (pipe_host_signal_wake, pipe_host_close)
+//    are always made with the BQL held: either directly
 //    from inside an engine callback (same thread), or from libva_gfx's
 //    "va-gfx-waker" thread, which takes engine->bql_lock() around them.
 //    Renderer threads never call into the engine directly, which avoids the
 //    BQL <-> RenderChannel lock inversion.
+//  * sync_timeline_inc is called directly from gfxstream's SyncThread (no
+//    BQL), as allowed by engine/qemu's goldfish_sync.h.
 
 #include "va_gfx_internal.h"
 
@@ -93,11 +95,9 @@ struct EngineCallbackScope {
 // ---------------------------------------------------------------------------
 
 struct DeferredOp {
-    enum Kind { kWake, kClose, kTimelineInc } kind;
+    enum Kind { kWake, kClose } kind;
     VaGfxPipe* pipe;
     unsigned flags;
-    uint64_t timeline;
-    uint32_t count;
 };
 
 void performOp(const DeferredOp& op);
@@ -211,17 +211,12 @@ void performOp(const DeferredOp& op) {
                 g.engine.pipe_host_close(op.pipe->hwpipe);
             }
             break;
-        case DeferredOp::kTimelineInc:
-            if (g.engine.sync_timeline_inc) {
-                g.engine.sync_timeline_inc(op.timeline, op.count);
-            }
-            break;
     }
 }
 
 void hwCloseFromHost(void* hw) {
     auto* p = static_cast<VaGfxPipe*>(hw);
-    DeferredOp op{DeferredOp::kClose, p, 0, 0, 0};
+    DeferredOp op{DeferredOp::kClose, p, 0};
     if (t_inEngineCallback) {
         performOp(op);
     } else {
@@ -231,7 +226,7 @@ void hwCloseFromHost(void* hw) {
 
 void hwSignalWake(void* hw, unsigned flags) {
     auto* p = static_cast<VaGfxPipe*>(hw);
-    DeferredOp op{DeferredOp::kWake, p, flags, 0, 0};
+    DeferredOp op{DeferredOp::kWake, p, flags};
     if (t_inEngineCallback) {
         performOp(op);
     } else {
@@ -325,12 +320,10 @@ int syncCreateFence(uint64_t timeline, uint32_t pt) {
 }
 
 void syncTimelineInc(uint64_t timeline, uint32_t count) {
-    DeferredOp op{DeferredOp::kTimelineInc, nullptr, 0, timeline, count};
-    if (t_inEngineCallback) {
-        performOp(op);
-    } else {
-        waker().push(op);
-    }
+    // engine/qemu goldfish_sync_timeline_inc() only queues and may be called
+    // from any thread with or without the BQL (hw/android/goldfish_sync.h),
+    // so signal fences directly from gfxstream's SyncThread: lowest latency.
+    if (g.engine.sync_timeline_inc) g.engine.sync_timeline_inc(timeline, count);
 }
 
 void syncDestroyTimeline(uint64_t timeline) {
@@ -598,32 +591,36 @@ std::string dirOfThisLibrary() {
     return ".";
 }
 
-// Finds ANGLE's libEGL/libGLESv2 next to libva_gfx (dylib layout), in sibling
-// frameworks (iOS app bundle layout), or in $VA_GFX_ANGLE_DIR.
+// Finds ANGLE's libGLESv2 next to libva_gfx (dylib layout), as a sibling
+// framework (iOS app bundle layout), or in $VA_GFX_ANGLE_DIR. ANGLE's
+// libGLESv2 also exports the EGL entry points (as EGL_Foo, which our patched
+// gfxstream loader accepts), so it serves as both the EGL and GLES library;
+// ANGLE's libEGL shim is not needed.
 void setupAngleLibraryPaths() {
     if (getenv("GFXSTREAM_EGL_LIB") && getenv("GFXSTREAM_GLESV2_LIB")) return;
     std::vector<std::string> dirs;
     if (const char* d = getenv("VA_GFX_ANGLE_DIR")) dirs.push_back(d);
     std::string self = dirOfThisLibrary();
     dirs.push_back(self);
-    dirs.push_back(self + "/..");          // .../Frameworks/va_gfx.framework/..
+    dirs.push_back(self + "/..");  // .../Frameworks/va_gfx.framework/..
     dirs.push_back(self + "/../lib");
     for (const auto& d : dirs) {
-        const std::string candidates[][2] = {
-            {d + "/libEGL.dylib", d + "/libGLESv2.dylib"},
-            {d + "/libEGL.framework/libEGL", d + "/libGLESv2.framework/libGLESv2"},
-            {d + "/EGL.framework/EGL", d + "/GLESv2.framework/GLESv2"},
+        const std::string candidates[] = {
+            d + "/libGLESv2.dylib",
+            d + "/GLESv2.framework/GLESv2",
+            d + "/GLESv2.framework/Versions/A/GLESv2",
+            d + "/libGLESv2.framework/libGLESv2",
         };
         for (const auto& c : candidates) {
-            if (fileExists(c[0]) && fileExists(c[1])) {
-                setenv("GFXSTREAM_EGL_LIB", c[0].c_str(), 1);
-                setenv("GFXSTREAM_GLESV2_LIB", c[1].c_str(), 1);
-                VLOG("ANGLE: %s", c[0].c_str());
+            if (fileExists(c)) {
+                setenv("GFXSTREAM_EGL_LIB", c.c_str(), 1);
+                setenv("GFXSTREAM_GLESV2_LIB", c.c_str(), 1);
+                VLOG("ANGLE: %s", c.c_str());
                 return;
             }
         }
     }
-    VLOG("ANGLE libraries not found next to %s; relying on the default dlopen search",
+    VLOG("ANGLE libGLESv2 not found next to %s; relying on the default dlopen search",
          self.c_str());
 }
 

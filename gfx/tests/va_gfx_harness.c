@@ -138,7 +138,7 @@ static int eng_sync_create_fence(uint64_t tl, uint32_t pt) { (void)tl; (void)pt;
 static void eng_sync_timeline_inc(uint64_t tl, uint32_t n)
 {
     (void)tl; (void)n;
-    if (!bql_held_by_me()) s_engine_calls_without_bql++;
+    /* allowed from any thread, with or without the BQL (goldfish_sync.h) */
     s_timeline_incs++;
 }
 static void eng_sync_destroy_timeline(uint64_t tl) { (void)tl; }

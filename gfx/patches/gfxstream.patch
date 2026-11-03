@@ -47,7 +47,7 @@ index d102831..04dc53c 100644
    dependencies: [aemu_base_dep, aemu_common_dep, aemu_snapshot_dep],
    link_with: [lib_host_features]
 diff --git a/host/gl/glestranslator/EGL/EglOsApi_egl.cpp b/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
-index 2fca845..f482fd8 100644
+index 2fca845..b513b0a 100644
 --- a/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
 +++ b/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
 @@ -81,8 +81,16 @@ static const char* kGLES2LibName = "libGLESv2.so";
@@ -69,6 +69,20 @@ index 2fca845..f482fd8 100644
  
  #endif // __APPLE__
  
+@@ -170,6 +178,13 @@ public:
+     this->function_name =                                              \
+             reinterpret_cast<return_type(GL_APIENTRY*) signature>(     \
+                     mLib->findSymbol(#function_name));                 \
++    if (!this->function_name) {                                        \
++        /* VirtualAndroid: ANGLE's libGLESv2 exports EGL as EGL_Foo. */ \
++        std::string angleName = std::string("EGL_") + (#function_name + 3); \
++        this->function_name =                                          \
++                reinterpret_cast<return_type(GL_APIENTRY*) signature>( \
++                        mLib->findSymbol(angleName.c_str()));          \
++    }                                                                  \
+     if (!this->function_name) {                                        \
+         this->function_name =                                          \
+                 reinterpret_cast<return_type(GL_APIENTRY*) signature>( \
 diff --git a/host/meson.build b/host/meson.build
 index 362af0a..bf25cbd 100644
 --- a/host/meson.build
