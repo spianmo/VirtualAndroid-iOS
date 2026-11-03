@@ -624,6 +624,31 @@ void setupAngleLibraryPaths() {
          self.c_str());
 }
 
+// Vulkan: gfxstream dlopens a "loader"; MoltenVK exports the full Vulkan API
+// (vkGetInstanceProcAddr etc.), so we point it straight at MoltenVK (no
+// Khronos loader needed, which is also how iOS apps use MoltenVK).
+bool setupVulkanLibraryPath() {
+    if (getenv("ANDROID_EMU_VK_LOADER_PATH")) return true;
+    std::vector<std::string> candidates;
+    if (const char* p = getenv("VA_GFX_MOLTENVK_PATH")) candidates.push_back(p);
+    std::string self = dirOfThisLibrary();
+    for (const std::string& d : {self, self + "/..", self + "/../lib"}) {
+        candidates.push_back(d + "/libMoltenVK.dylib");
+        candidates.push_back(d + "/MoltenVK.framework/MoltenVK");
+        candidates.push_back(d + "/MoltenVK.framework/Versions/A/MoltenVK");
+        candidates.push_back(d + "/libvulkan.dylib");
+    }
+    for (const auto& c : candidates) {
+        if (fileExists(c)) {
+            setenv("ANDROID_EMU_VK_LOADER_PATH", c.c_str(), 1);
+            VLOG("Vulkan: %s", c.c_str());
+            return true;
+        }
+    }
+    VLOG("Vulkan requested but no MoltenVK found next to %s; disabling Vulkan", self.c_str());
+    return false;
+}
+
 void buildFeatures(gfxstream::host::FeatureSet* f, bool vulkan, bool sync) {
 #define VA_FEATURE(name, value) GFXSTREAM_SET_FEATURE_ON_CONDITION(f, name, value)
     // Matches what the official emulator negotiates with an API 33
@@ -715,6 +740,8 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_init(const VaGfxCon
         setupAngleLibraryPaths();
         if (!getenv("ANGLE_DEFAULT_PLATFORM")) setenv("ANGLE_DEFAULT_PLATFORM", "metal", 1);
     }
+
+    if (g.cfg.enable_vulkan && !setupVulkanLibraryPath()) g.cfg.enable_vulkan = false;
 
     initAgents();
     sMultiDisplayAgent.setMultiDisplay(0, 0, 0, w, h, g.cfg.display_dpi, 0, true);

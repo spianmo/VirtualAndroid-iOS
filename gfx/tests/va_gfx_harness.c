@@ -37,6 +37,7 @@ static int (*p_va_gfx_get_gles_version)(int *, int *);
 static void (*p_va_gfx_teardown)(void);
 
 static int failures = 0;
+static int s_vulkan_advertised = 0;
 #define CHECK(cond, ...)                                       \
     do {                                                       \
         if (!(cond)) {                                         \
@@ -463,7 +464,8 @@ static int near(const uint8_t a[4], int r, int g, int b)
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <libva_gfx.dylib> <out_dir> [angle|native]\n", argv[0]);
+        fprintf(stderr, "usage: %s <libva_gfx.dylib> <out_dir> [angle|native] [vulkan]\n",
+                argv[0]);
         return 2;
     }
     const char *backend = argc > 3 ? argv[3] : "angle";
@@ -485,7 +487,7 @@ int main(int argc, char **argv)
 
     VaGfxConfig cfg = {
         .display_width = W, .display_height = H, .display_dpi = 240, .refresh_hz = 60,
-        .gles_backend = backend, .enable_vulkan = false,
+        .gles_backend = backend, .enable_vulkan = argc > 4 && !strcmp(argv[4], "vulkan"),
     };
     VaGfxEngineOps ops = {
         .pipe_add_type = eng_pipe_add_type,
@@ -544,6 +546,9 @@ int main(int argc, char **argv)
     printf("GL_EXTENSIONS (ANDROID_EMU_*):");
     for (char *tok = strtok(str, " "); tok; tok = strtok(NULL, " ")) {
         if (!strncmp(tok, "ANDROID_EMU", 11)) printf(" %s", tok);
+        if (!strncmp(tok, "ANDROID_EMU_vulkan", 18) && !strcmp(tok, "ANDROID_EMU_vulkan")) {
+            s_vulkan_advertised = 1;
+        }
     }
     printf("\n");
     uint32_t fbw = rcN(gl, OP_rcGetFBParam, 1, 1, 1);
@@ -552,6 +557,8 @@ int main(int argc, char **argv)
     uint32_t fps = rcN(gl, OP_rcGetFBParam, 1, 1, 5);
     printf("rcGetFBParam: %ux%u xdpi=%u fps=%u\n", fbw, fbh, dpi, fps);
     CHECK(fbw == W && fbh == H, "fb size");
+    printf("host Vulkan for the guest: %s\n", s_vulkan_advertised ? "advertised" : "not advertised");
+    if (cfg.enable_vulkan) CHECK(s_vulkan_advertised, "Vulkan requested but not advertised");
 
     /* --- Frame 1: CPU upload (gralloc path) + post --- */
     uint32_t cb1 = rcN(gl, OP_rcCreateColorBuffer, 1, 3, W, H, 0x1908 /* GL_RGBA */);
