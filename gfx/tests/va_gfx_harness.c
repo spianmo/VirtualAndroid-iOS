@@ -27,8 +27,7 @@
 #include "hw/android/android_pipe.h"
 #include "va_gfx.h"
 
-#define W 320
-#define H 480
+static int W = 320, H = 480; /* override with HARNESS_W / HARNESS_H */
 
 static int (*p_va_gfx_init)(const VaGfxConfig *, const VaGfxEngineOps *, VaGfxPresentFn, void *);
 static void (*p_va_gfx_register_pipe_services)(void);
@@ -490,6 +489,8 @@ int main(int argc, char **argv)
         return 2;
     }
     const char *backend = argc > 3 ? argv[3] : "angle";
+    if (getenv("HARNESS_W")) W = atoi(getenv("HARNESS_W"));
+    if (getenv("HARNESS_H")) H = atoi(getenv("HARNESS_H"));
     void *lib = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
         fprintf(stderr, "dlopen: %s\n", dlerror());
@@ -674,6 +675,29 @@ int main(int argc, char **argv)
     }
     bql_lock();
 
+    /* --- Throughput: GLES clear + flush + post, waiting for each IOSurface frame --- */
+    {
+        const int n = 60;
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (int i = 0; i < n; i++) {
+            gl_clear_color(gl, (float)i / n, 0.5f, 1.0f - (float)i / n, 1.0f);
+            rcN(gl, OP_glClear, 0, 1, 0x4000);
+            (void)rcN(gl, OP_rcFlushWindowColorBuffer, 1, 1, surf);
+            rcN(gl, OP_rcFBPost, 0, 1, cb2);
+            (void)rc0(gl, OP_rcGetRendererVersion);
+            bql_unlock();
+            IOSurfaceRef f = wait_frame(3 + i);
+            if (f) CFRelease(f);
+            bql_lock();
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        printf("throughput: %d posted frames %dx%d in %.1f ms = %.2f ms/frame (%.1f fps)\n", n, W,
+               H, ms, ms / n, n * 1000.0 / ms);
+    }
+    const int frames_before_compose = s_frames;
+
     /* --- Frame 3: hwcomposer host composition (rcCompose, what EmuHWC2 uses) --- */
     {
         uint32_t target = rcN(gl, OP_rcCreateColorBuffer, 1, 3, W, H, 0x1908);
@@ -700,7 +724,7 @@ int main(int argc, char **argv)
         CHECK(r == 0 || r == 1, "rcCompose = %d", r);
     }
     bql_unlock();
-    IOSurfaceRef f3 = wait_frame(3);
+    IOSurfaceRef f3 = wait_frame(frames_before_compose + 1);
     CHECK(f3, "no frame after rcCompose");
     if (f3) {
         snprintf(path, sizeof(path), "%s/va_gfx_frame3_compose_%s.png", argv[2], backend);
