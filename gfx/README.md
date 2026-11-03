@@ -190,13 +190,32 @@ androidboot.qemu.vsync=<refresh_hz>
   runs from static destructors (all state is leaked heap memory), and the
   gfxstream registries render threads touch are leaked singletons, so exit
   never joins renderer threads.
+* Teardown from an exit notifier (what ranchu does): `va_gfx_init` registers an
+  `atexit` handler last, so it runs first in `exit()` — before ANGLE's and
+  gfxstream's static destructors and before QEMU's notifiers. It stops every
+  callback and marks the process as exiting; afterwards `va_gfx_teardown()`
+  and all pipe callbacks (close included) are immediate no-ops and the
+  renderer threads are left to the OS. Real guest: QEMU exits ~0.1 s after
+  SIGTERM. For an orderly shutdown (e.g. an iOS app stopping a VM but staying
+  alive) call `va_gfx_teardown()` before `exit()`.
 * Tested by `tests/run-exit-tests.sh <macos|ios-sim> [udid]`: pipes closed then
   teardown, exit() with live render threads, exit() while the render thread is
-  busy, and teardown with pipes still open. Each run has a 30 s hang watchdog.
+  busy, QEMU's order (atexit notifier registered before dlopen closes the pipes
+  and tears down), teardown with pipes still open, and teardown while a render
+  thread is wedged in the post path holding the FrameBuffer lock (must return
+  at the deadline). Each run has a 30 s hang watchdog.
 * Snapshot save/load of these pipes is not implemented yet (`save`/`load` are
   NULL, so the engine closes them on load; the guest reconnects).
 
 ## Implementation notes
+
+* ANGLE must be built with `ANGLE_ENABLE_SHARE_CONTEXT_LOCK=1` and
+  `ANGLE_ENABLE_CONTEXT_MUTEX=1` (`scripts/build-angle.sh` does this; standalone
+  ANGLE enables them by default, WebKit's Xcode build does not). gfxstream runs
+  one GL context per guest thread, all in one share group, from many host
+  threads; without the locks a real guest corrupts shared GL state within
+  seconds of boot (a render thread spins in `gl::Framebuffer::setAttachment`
+  holding the FrameBuffer lock, frames stop, system_server's watchdog fires).
 
 * `libva_gfx/va_gfx_pipe_shim.c` is the only file that sees QEMU's
   `android_pipe.h`; `va_gfx.cpp` sees aemu's (conflicting) pipe headers. A guest
