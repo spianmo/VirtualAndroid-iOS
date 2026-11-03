@@ -8,6 +8,7 @@
 #   -c   clean: drop this platform's src/sysroot/Frameworks/stamps first
 #   -x   debug build
 #   --only PKG   rebuild only one package (removes its stamp)
+#   KEEP_SRC=1   keep the unpacked/built sources (deleted by default to save disk)
 #
 # Packages (in order): libucontext libffi libiconv gettext(libintl only)
 # glib pixman zstd libslirp.  Sources come from third_party/dl, patches from
@@ -166,4 +167,9 @@ step pixman build_pixman
 step zstd build_zstd
 step libslirp build_libslirp
 package_frameworks
+# sources are unpacked fresh by every step, so they are pure intermediates
+if [ -z "$KEEP_SRC" ]; then
+    say "removing unpacked sources (KEEP_SRC=1 keeps them)"
+    rm -rf "$SRCROOT"
+fi
 say "done"

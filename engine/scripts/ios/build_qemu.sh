@@ -16,7 +16,6 @@
 # Requires build_deps.sh for the same platform.  Output:
 #   engine/build-ios/<platform>-<arch>/qemu-<backend>/
 #       build/                      meson/ninja build dir
-#       install/                    make install (lib, bin, include)
 #       Frameworks/qemu-aarch64-softmmu.framework
 #       bin/va-qemu-launch          dlopen launcher (CLI test harness)
 set -e
@@ -69,7 +68,7 @@ done
 [ -x "$QEMU_SRC/configure" ] || die "no QEMU source at $QEMU_SRC"
 
 [ -n "$CLEAN" ] && rm -rf "$Q"
-mkdir -p "$BUILD" "$INSTALL" "$QFW" "$Q/bin"
+mkdir -p "$BUILD" "$QFW" "$Q/bin"
 
 case "$BACKEND" in
 tcg )
@@ -124,9 +123,9 @@ fi
 
 say "building QEMU ($BACKEND)"
 ninja -C "$BUILD" -j "$NCPU"
-ninja -C "$BUILD" install >/dev/null
 
-LIB="$INSTALL/lib/libqemu-aarch64-softmmu.dylib"
+# no `ninja install`: the framework is packaged straight from the build dir
+LIB="$BUILD/libqemu-aarch64-softmmu.dylib"
 [ -f "$LIB" ] || die "missing $LIB"
 say "packaging qemu-aarch64-softmmu.framework"
 make_framework "$LIB" "$QFW" "$FRAMEWORKS"
