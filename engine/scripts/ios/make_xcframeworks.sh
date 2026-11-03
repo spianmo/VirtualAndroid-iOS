@@ -25,8 +25,28 @@ DEV="$OUT/ios-arm64"
 XCF="$OUT/xcframeworks"
 mkdir -p "$XCF"
 
-names=$( (ls "$SIM/Frameworks" "$DEV/Frameworks" 2>/dev/null; echo qemu-aarch64-softmmu.framework) \
-         | grep '\.framework$' | sort -u | sed 's/\.framework$//')
+# Only the frameworks QEMU actually loads (transitive @rpath imports), so
+# that unused glib/iconv bits (gthread, girepository, charset) stay out.
+fw_path () {  # $1 platform dir, $2 backend, $3 name
+    if [ "$3" = qemu-aarch64-softmmu ]; then echo "$1/qemu-$2/Frameworks/$3.framework/$3"
+    else echo "$1/Frameworks/$3.framework/$3"; fi
+}
+closure () {  # $1 platform dir, $2 backend
+    todo="qemu-aarch64-softmmu"; seen=" "
+    while [ -n "$todo" ]; do
+        set -- $todo; n=$1; shift; todo="$*"
+        case "$seen" in *" $n "*) continue ;; esac
+        seen="$seen$n "
+        f="$(fw_path "$PLAT" "$BK" "$n")"
+        [ -f "$f" ] || continue
+        todo="$todo $(otool -L "$f" | tail -n +2 | awk '{print $1}' | grep '^@rpath/' \
+                     | sed 's|^@rpath/\([^/]*\)\.framework/.*|\1|' | tr '\n' ' ')"
+    done
+    echo $seen
+}
+names="$( (PLAT="$SIM" BK="$SIM_BACKEND" closure; PLAT="$DEV" BK="$DEV_BACKEND" closure) | tr ' ' '\n' | sort -u)"
+[ -n "$names" ] || { echo "nothing built yet" >&2; exit 1; }
+
 for n in $names; do
     args=()
     if [ "$n" = qemu-aarch64-softmmu ]; then

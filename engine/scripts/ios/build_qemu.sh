@@ -53,6 +53,18 @@ BUILD="$Q/build"
 INSTALL="$Q/install"
 QFW="$Q/Frameworks"
 
+if [ -n "$(git -C "$QEMU_SRC" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    say "WARNING: $QEMU_SRC has uncommitted changes (another agent may be mid-edit);"
+    say "         use -s engine/qemu-ios (branch ios = master + iOS fixes) for a stable tree"
+fi
+# --disable-download needs the wrap subprojects checked out (git-ignored, so a
+# fresh worktree lacks them): borrow them from engine/qemu when possible.
+for sp in dtc keycodemapdb berkeley-softfloat-3 berkeley-testfloat-3; do
+    if [ ! -d "$QEMU_SRC/subprojects/$sp" ] && [ -d "$ROOT/engine/qemu/subprojects/$sp" ]; then
+        say "copying subprojects/$sp from engine/qemu"
+        rsync -a "$ROOT/engine/qemu/subprojects/$sp" "$QEMU_SRC/subprojects/"
+    fi
+done
 [ -f "$PREFIX/lib/pkgconfig/glib-2.0.pc" ] || die "dependencies missing: run build_deps.sh -p $PLATFORM first"
 [ -x "$QEMU_SRC/configure" ] || die "no QEMU source at $QEMU_SRC"
 
