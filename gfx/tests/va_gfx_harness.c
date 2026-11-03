@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "hw/android/android_pipe.h"
 #include "va_gfx.h"
@@ -109,6 +110,9 @@ typedef struct {
     int closed;
 } FakePipe;
 
+static FakePipe *s_pipes[8]; /* open guest pipes, for the atexit exit notifier */
+static int s_npipes = 0;
+
 static void eng_pipe_add_type(const char *name, void *opaque, const AndroidPipeFuncs *funcs)
 {
     printf("engine: pipe service registered: %s\n", name);
@@ -171,6 +175,7 @@ static FakePipe *guest_open(const char *name)
                 free(p);
                 return NULL;
             }
+            if (s_npipes < 8) s_pipes[s_npipes++] = p;
             return p;
         }
     }
@@ -179,6 +184,9 @@ static FakePipe *guest_open(const char *name)
 
 static void guest_close(FakePipe *p)
 {
+    for (int i = 0; i < s_npipes; i++) {
+        if (s_pipes[i] == p) s_pipes[i] = NULL;
+    }
     p->svc->funcs->close(p->state);
     free(p);
 }
@@ -387,11 +395,22 @@ static pthread_cond_t s_frame_cond = PTHREAD_COND_INITIALIZER;
 static int s_frames = 0;
 static IOSurfaceRef s_last_surface = NULL;
 static int s_present_with_bql = 0;
+/* teardown-stuck: the present callback never returns (render thread wedged
+ * inside FrameBuffer::postImpl with the FrameBuffer lock held). */
+static volatile int s_block_present = 0;
+static int s_present_entered = 0;
+static pthread_cond_t s_never = PTHREAD_COND_INITIALIZER;
 
 static void on_present(void *opaque, const VaGfxFrame *frame)
 {
     (void)opaque;
     if (bql_held_by_me()) s_present_with_bql++;
+    if (s_block_present) {
+        pthread_mutex_lock(&s_frame_lock);
+        s_present_entered = 1;
+        pthread_cond_broadcast(&s_frame_cond);
+        for (;;) pthread_cond_wait(&s_never, &s_frame_lock); /* wedged forever */
+    }
     pthread_mutex_lock(&s_frame_lock);
     if (s_last_surface) CFRelease(s_last_surface);
     s_last_surface = (IOSurfaceRef)frame->iosurface;
@@ -489,6 +508,31 @@ typedef struct {
 } ComposeDeviceV2;
 _Static_assert(sizeof(ComposeLayer) == 56, "ComposeLayer layout");
 
+/*
+ * HARNESS_EXIT=atexit: what QEMU does. An exit notifier is registered with
+ * atexit() before libva_gfx is dlopen'ed, so it runs *after* libva_gfx's (and
+ * ANGLE's) static destructors; it closes every pipe (BQL) and then calls
+ * va_gfx_teardown(), like engine/qemu hw/android/ranchu.c:ranchu_exit().
+ */
+static int s_atexit_mode = 0;
+
+static void harness_qemu_exit_notifier(void)
+{
+    if (!s_atexit_mode) return;
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    const int locked = bql_held_by_me();
+    if (!locked) bql_lock();
+    for (int i = s_npipes - 1; i >= 0; i--) {
+        if (s_pipes[i]) s_pipes[i]->svc->funcs->close(s_pipes[i]->state);
+    }
+    if (!locked) bql_unlock();
+    p_va_gfx_teardown();
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    printf("exit: exit notifier (close all pipes + va_gfx_teardown) took %.1f ms\n",
+           (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6);
+}
+
 /* ------------------------------------------------------------------ */
 
 int main(int argc, char **argv)
@@ -499,6 +543,7 @@ int main(int argc, char **argv)
         return 2;
     }
     setvbuf(stdout, NULL, _IOLBF, 0);
+    atexit(harness_qemu_exit_notifier); /* before dlopen, like QEMU */
     const char *backend = argc > 3 ? argv[3] : "angle";
     if (getenv("HARNESS_W")) W = atoi(getenv("HARNESS_W"));
     if (getenv("HARNESS_H")) H = atoi(getenv("HARNESS_H"));
@@ -840,10 +885,59 @@ int main(int argc, char **argv)
      *   live          exit() with open pipes and live render threads, no teardown
      *                 (QEMU SIGTERM without a shutdown handler)
      *   live-busy     like live, but with queued GL work and posts in flight
+ *   atexit        exit(); an atexit handler registered before dlopen (so it runs
+ *                 after libva_gfx's and ANGLE's static destructors) closes the
+ *                 pipes and calls va_gfx_teardown() -- QEMU's exit-notifier order
  *   teardown-open va_gfx_teardown() with the pipes still open, then exit()
+ *   teardown-stuck a render thread is wedged in the post path holding the
+ *                 FrameBuffer lock (another waits on it); teardown must return
+ *                 within VA_GFX_TEARDOWN_TIMEOUT_MS and exit() must not hang
      */
     const char *exit_mode = getenv("HARNESS_EXIT") ? getenv("HARNESS_EXIT") : "";
     printf("%s (%d failures)\n", failures ? "HARNESS FAILED" : "HARNESS PASSED", failures);
+    if (!strcmp(exit_mode, "atexit")) {
+        s_atexit_mode = 1;
+        printf("exit: calling exit(); the exit notifier closes the pipes and tears down\n");
+        exit(failures ? 1 : 0); /* BQL held, like QEMU's main loop thread */
+    }
+    if (!strcmp(exit_mode, "teardown-stuck")) {
+        /* 1) wedge a render thread in the post path while it holds the FB lock */
+        s_block_present = 1;
+        rcN(gl, OP_rcFBPost, 0, 1, cb2);
+        bql_unlock();
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 5;
+        pthread_mutex_lock(&s_frame_lock);
+        while (!s_present_entered &&
+               pthread_cond_timedwait(&s_frame_cond, &s_frame_lock, &ts) != ETIMEDOUT) {
+        }
+        const int wedged = s_present_entered;
+        pthread_mutex_unlock(&s_frame_lock);
+        bql_lock();
+        CHECK(wedged, "could not wedge a render thread");
+        /* 2) a second render thread queues behind the FB lock (no reply read) */
+        FakePipe *gl2 = guest_open("opengles");
+        if (gl2) {
+            uint32_t flags2 = 0;
+            guest_write(gl2, &flags2, 4);
+            rcN(gl2, OP_rcCreateColorBuffer, 0, 3, 64, 64, 0x1908);
+        }
+        usleep(200 * 1000);
+        /* 3) teardown on the "main thread" with the BQL held must still return */
+        struct timespec a, b;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        p_va_gfx_teardown();
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        p_va_gfx_teardown();
+        const double ms = (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6;
+        const char *to = getenv("VA_GFX_TEARDOWN_TIMEOUT_MS");
+        const double limit = (to ? atof(to) : 3000.0) + 1000.0;
+        CHECK(ms < limit, "teardown took %.0f ms with a wedged render thread", ms);
+        printf("exit: va_gfx_teardown (teardown-stuck, render thread wedged holding the "
+               "FrameBuffer lock) took %.1f ms; %s\n", ms, failures ? "FAILED" : "ok");
+        exit(failures ? 1 : 0); /* BQL held; wedged threads are left behind */
+    }
     if (!strcmp(exit_mode, "live-busy")) {
         /* queue lots of GL work + posts, then exit while the render thread is busy */
         for (int i = 0; i < 300; i++) {

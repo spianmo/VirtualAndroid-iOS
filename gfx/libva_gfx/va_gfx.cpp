@@ -19,7 +19,9 @@
 // state is heap-allocated and intentionally leaked, so a process that exits
 // without va_gfx_teardown() (e.g. QEMU on SIGTERM) never joins renderer
 // threads. va_gfx_teardown() is the only orderly shutdown; it is idempotent,
-// bounded in time and safe to call with the BQL held.
+// bounded in time and safe to call with the BQL held. Once the process has
+// started exiting (our atexit handler ran) teardown and all pipe callbacks
+// are no-ops: exit() must never wait for, or call into, the renderer.
 
 #include "va_gfx_internal.h"
 
@@ -89,6 +91,12 @@ struct State {
     // Set by va_gfx_teardown(): no new pipes, no engine calls from our threads.
     std::atomic<bool> shutdown{false};
     std::atomic<bool> teardownStarted{false};
+    // Set by our atexit handler, which runs *before* ANGLE's and this
+    // library's static destructors (it is registered last, at the end of
+    // va_gfx_init). From then on nothing may touch the renderer, ANGLE or
+    // gfxstream: an embedder exit notifier that calls va_gfx_teardown() or
+    // closes pipes later in exit() would otherwise use destroyed globals.
+    std::atomic<bool> processExiting{false};
 };
 
 // Never destroyed (see "Lifetime" above).
@@ -195,6 +203,8 @@ Waker& waker() {
     return *w;
 }
 
+void onProcessExit();  // atexit handler, defined below va_gfx_init
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -265,7 +275,7 @@ const AndroidPipeHwFuncs kHwFuncs = {
 
 extern "C" VaGfxPipe* vagfx_pipe_open(void* hwpipe, const char* service, const char* args) {
     EngineCallbackScope scope;
-    if (g.shutdown.load()) {
+    if (g.shutdown.load() || g.processExiting.load()) {
         VLOG("guest opened '%s' after va_gfx_teardown(); refusing", service);
         return nullptr;
     }
@@ -299,6 +309,7 @@ extern "C" VaGfxPipe* vagfx_pipe_open(void* hwpipe, const char* service, const c
 extern "C" void vagfx_pipe_close(VaGfxPipe* p) {
     EngineCallbackScope scope;
     if (!p) return;
+    if (g.processExiting.load()) return;  // leak: don't wake render threads during exit()
     if (p->aemuPipe) {
         android_pipe_guest_close(p->aemuPipe, PIPE_CLOSE_GRACEFUL);
         p->aemuPipe = nullptr;
@@ -309,22 +320,26 @@ extern "C" void vagfx_pipe_close(VaGfxPipe* p) {
 
 extern "C" int vagfx_pipe_send(VaGfxPipe* p, const void* buffers, int n) {
     EngineCallbackScope scope;
+    if (g.processExiting.load()) return PIPE_ERROR_IO;
     return android_pipe_guest_send(&p->aemuPipe, static_cast<const AndroidPipeBuffer*>(buffers),
                                    n);
 }
 
 extern "C" int vagfx_pipe_recv(VaGfxPipe* p, void* buffers, int n) {
     EngineCallbackScope scope;
+    if (g.processExiting.load()) return PIPE_ERROR_IO;
     return android_pipe_guest_recv(p->aemuPipe, static_cast<AndroidPipeBuffer*>(buffers), n);
 }
 
 extern "C" unsigned vagfx_pipe_poll(VaGfxPipe* p) {
     EngineCallbackScope scope;
+    if (g.processExiting.load()) return PIPE_POLL_HUP;
     return android_pipe_guest_poll(p->aemuPipe);
 }
 
 extern "C" void vagfx_pipe_wake_on(VaGfxPipe* p, int flags) {
     EngineCallbackScope scope;
+    if (g.processExiting.load()) return;
     android_pipe_guest_wake_on(p->aemuPipe, static_cast<unsigned>(flags));
 }
 
@@ -844,9 +859,29 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_init(const VaGfxCon
     }
     VLOG("frame delivery: %s", zeroCopy ? "zero-copy IOSurface blit" : "readback");
 
+    // Last, so it runs first at exit (atexit is LIFO): before ANGLE (dlopened
+    // above) and libva_gfx static destructors, and before any embedder exit
+    // notifier registered earlier (QEMU's).
+    atexit(onProcessExit);
+
     g.initialized = true;
     return 0;
 }
+
+namespace {
+
+// Registered at the end of va_gfx_init, so it runs before the static
+// destructors of ANGLE and of this library. Cheap and non-blocking: stop all
+// callbacks into the engine and the embedder, and freeze the renderer (its
+// threads are left alone; the OS reclaims everything).
+void onProcessExit() {
+    g.processExiting.store(true);
+    g.shutdown.store(true);
+    vagfx_present_disable();
+    waker().stop();  // never joins
+}
+
+}  // namespace
 
 extern "C" void vagfx_request_readback_fallback(void) {
     static std::atomic<bool> requested{false};
@@ -884,6 +919,13 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_get_gles_version(in
 extern "C" __attribute__((visibility("default"))) void va_gfx_teardown(void) {
     // Idempotent; also a no-op if va_gfx_init never succeeded.
     if (!g.initialized || g.teardownStarted.exchange(true)) return;
+    if (g.processExiting.load()) {
+        // Called from an exit notifier: globals of ANGLE/gfxstream may already
+        // be destroyed. Our atexit handler already stopped every callback;
+        // leave the renderer threads to the OS.
+        VLOG("teardown during process exit: renderer left to the OS");
+        return;
+    }
 
     // 1. Synchronous and non-blocking (safe with the BQL held): stop talking
     //    to the engine and the embedder.

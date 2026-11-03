@@ -192,6 +192,22 @@ index a2c82d3..225f11d 100644
  
  static bool sIdExistsInRegistry(uint64_t id) {
      AutoLock lock(sRegistry.lock);
+diff --git a/host/gl/gl-host-common/opengles.cpp b/host/gl/gl-host-common/opengles.cpp
+index 8da6668..c3086da 100644
+--- a/host/gl/gl-host-common/opengles.cpp
++++ b/host/gl/gl-host-common/opengles.cpp
+@@ -43,7 +43,10 @@ static bool sOpenglLoggerInitialized = false;
+ static bool sRendererUsesSubWindow = false;
+ static bool sEgl2egl = false;
+ static gfxstream::RenderLib* sRenderLib = nullptr;
+-static gfxstream::RendererPtr sRenderer = nullptr;
++// VirtualAndroid: leaked on purpose. The embedder may tear down from an exit
++// handler that runs after this library's static destructors; a destroyed
++// shared_ptr here would be released twice (-> ~RendererImpl on the caller).
++static gfxstream::RendererPtr& sRenderer = *new gfxstream::RendererPtr;
+ 
+ int android_prepareOpenglesEmulation() {
+     android_init_opengl_logger();
 diff --git a/host/gl/glestranslator/EGL/EglGlobalInfo.cpp b/host/gl/glestranslator/EGL/EglGlobalInfo.cpp
 index 167772c..ea7289b 100644
 --- a/host/gl/glestranslator/EGL/EglGlobalInfo.cpp
