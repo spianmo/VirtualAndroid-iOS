@@ -44,7 +44,7 @@ removed from PATH and pkg-config only sees the platform sysroot.
 | `<plat>-arm64/Frameworks/*.framework` | dependency frameworks |
 | `<plat>-arm64/qemu-<tcg\|tcti>/Frameworks/qemu-aarch64-softmmu.framework` | QEMU |
 | `<plat>-arm64/qemu-<backend>/bin/va-qemu-launch` | CLI harness (dlopen + entry points) |
-| `<plat>-arm64/qemu-<backend>/build` | ninja build dir (incremental rebuilds) |
+| `<plat>-arm64/qemu-<backend>/build` | ninja build dir (incremental rebuilds; 0.6 GB tcg, 1.4 GB tcti: safe to delete, only the build dirs of ios_simulator/tcg are kept) |
 | `xcframeworks/*.xcframework` | what the app embeds; `qemu-backends.txt` says which backend each QEMU slice is |
 | `run/<name>/` | run_sim.sh state: disks, `serial.log`, `logcat.log`, `qemu.out`, `milestones.txt` |
 
