@@ -151,6 +151,16 @@ typedef struct VaHostCallbacks {
 /* Install before starting the engine. The struct is copied. */
 void va_host_set_callbacks(const VaHostCallbacks *callbacks);
 
+/*
+ * Composed guest frames. The engine loads libva_gfx and passes this callback
+ * to va_gfx_init() as its VaGfxPresentFn (same signature; struct VaGfxFrame
+ * is defined in gfx/include/va_gfx.h). Called on a renderer thread.
+ * Install before starting the engine; without it frames are dropped.
+ */
+struct VaGfxFrame;
+typedef void (*VaHostPresentFn)(void *opaque, const struct VaGfxFrame *frame);
+void va_host_set_present_callback(VaHostPresentFn present, void *opaque);
+
 /* ---- platform -> engine (thread-safe) ---- */
 void va_engine_sensor_event(VaSensorType type, const float *values, int count,
                             int64_t timestamp_ns);
