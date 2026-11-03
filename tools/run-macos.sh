@@ -3,7 +3,7 @@
 #
 #   tools/run-macos.sh [--fresh] [--tcg] [--machine virt|ranchu] [--display] [--timeout SECS]
 #                      [--name RUN] [--adb-port PORT] [--trace PATTERN]... [--console]
-#                      [-- extra qemu args]
+#                      [--gfx-lib PATH|none] [--screenshot-dir DIR] [-- extra qemu args]
 #
 # --machine ranchu (the Android emulator board: virt + goldfish pipe/sync/battery/events,
 # virtio multitouch + "qwerty2" keyboard) also enables the android_pipe_connect trace, so
@@ -11,6 +11,9 @@
 # event patterns (e.g. --trace 'goldfish_*'). --console makes the kernel console (where
 # the image runs a root-capable 'console' shell) a unix socket, $RUN/console.sock, still
 # logged to serial.log; talk to it with e.g. `nc -U engine/run/<name>/console.sock`.
+# ranchu loads the host renderer from --gfx-lib (default gfx/build-macos/dist/libva_gfx.dylib
+# if built; "none" = no graphics). --screenshot-dir DIR writes guest frames to DIR/latest.png
+# (+ the first few as frame-N.png; VA_DUMP_EVERY=N sets the interval, default 30 frames).
 #   QEMU=/path/to/qemu-system-aarch64 overrides the binary (each agent uses its own build dir).
 #
 # Per-run state lives in engine/run/<name> (default "dev"): writable disks,
@@ -22,7 +25,7 @@ QEMU=${QEMU:-$ROOT/engine/build-macos/qemu-system-aarch64}
 QEMU_IMG=${QEMU_IMG:-$ROOT/engine/build-macos/qemu-img}
 E2=$(brew --prefix e2fsprogs)/sbin
 NAME=dev FRESH=0 ACCEL=hvf MACHINE=virt DISPLAY_OPT=(-display none) TIMEOUT=0 ADB_PORT=5555
-TRACES=() CONSOLE=0
+TRACES=() CONSOLE=0 GFX_LIB=auto SHOT_DIR=
 while (( $# )); do
   case $1 in
     --fresh) FRESH=1 ;;
@@ -34,6 +37,8 @@ while (( $# )); do
     --adb-port) ADB_PORT=$2; shift ;;
     --trace) TRACES+=($2); shift ;;
     --console) CONSOLE=1 ;;
+    --gfx-lib) GFX_LIB=$2; shift ;;
+    --screenshot-dir) SHOT_DIR=${2:A}; shift ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -47,7 +52,10 @@ if (( FRESH )) || [[ ! -f $RUN/userdata.img ]]; then
   mkfile -n 6g $RUN/userdata.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L data $RUN/userdata.img
   mkfile -n 64m $RUN/cache.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L cache $RUN/cache.img
 fi
-[[ -f $RUN/initrd ]] || python3 -I $ROOT/tools/make_initrd.py $IMG/ramdisk.img $RUN/initrd
+# Rebuild when the bootconfig defaults change.
+if [[ ! -f $RUN/initrd || $ROOT/tools/make_initrd.py -nt $RUN/initrd ]]; then
+  python3 -I $ROOT/tools/make_initrd.py $IMG/ramdisk.img $RUN/initrd
+fi
 rm -f $RUN/serial.log $RUN/logcat.log $RUN/hvc0.log $RUN/console.sock
 SERIAL_OPT=(-serial file:$RUN/serial.log)
 if (( CONSOLE )); then
@@ -55,7 +63,14 @@ if (( CONSOLE )); then
               -serial chardev:ser0)
 fi
 
-[[ $MACHINE == ranchu* ]] && TRACES=(android_pipe_connect $TRACES)
+if [[ $MACHINE == ranchu* ]]; then
+  TRACES=(android_pipe_connect $TRACES)
+  [[ $GFX_LIB == auto ]] && GFX_LIB=$ROOT/gfx/build-macos/dist/libva_gfx.dylib
+  [[ $GFX_LIB == auto || ! -f $GFX_LIB ]] && [[ $GFX_LIB != none ]] && {
+    echo "warning: no libva_gfx at $GFX_LIB, booting without graphics" >&2; GFX_LIB=none; }
+  if [[ $GFX_LIB == none ]]; then MACHINE=$MACHINE,gfx=off; else MACHINE=$MACHINE,gfx-lib=$GFX_LIB; fi
+fi
+[[ -n $SHOT_DIR ]] && export VA_DUMP_FRAMES=$SHOT_DIR
 TRACE_OPT=()
 for t in $TRACES; do TRACE_OPT+=(-trace "enable=$t"); done
 

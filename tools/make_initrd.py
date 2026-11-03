@@ -18,7 +18,11 @@ DEFAULTS = {
     "androidboot.qemu.gltransport.name": "pipe",
     "androidboot.qemu.gltransport.drawFlushInterval": "800",
     "androidboot.hardware.vulkan": "ranchu",
-    "androidboot.opengles.version": "196609",
+    # Must match what the host renderer (libva_gfx) supports: ANGLE Metal on
+    # Apple = GLES 3.0 = (3 << 16) | 0. The engine logs the value it needs at
+    # startup ("ranchu: guest needs androidboot.opengles.version=..."); the
+    # official emulator (swangle) used 196609 (3.1).
+    "androidboot.opengles.version": "196608",
     "androidboot.debug.hwui.renderer": "skiagl",
     "androidboot.dalvik.vm.heapsize": "512m",
     "androidboot.logcat": "*:V",
