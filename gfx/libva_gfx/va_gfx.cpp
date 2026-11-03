@@ -798,10 +798,32 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_init(const VaGfxCon
 
     waker().start();
     vagfx_present_init(w, h, present, opaque);
-    g.renderer->setPostCallback(onPost, nullptr, true /* BGRA readback */, 0);
+    // Zero-copy (ANGLE): posted ColorBuffers are blitted into IOSurfaces on
+    // the GPU. Otherwise (native CGL, or VA_GFX_FORCE_READBACK=1): synchronous
+    // BGRA readback into IOSurfaces.
+    bool zeroCopy = false;
+    if (angle && !getenv("VA_GFX_FORCE_READBACK")) {
+        const char* glesLib = getenv("GFXSTREAM_GLESV2_LIB");
+        zeroCopy = vagfx_present_gl_enable(glesLib ? glesLib : "libGLESv2.dylib");
+    }
+    if (!zeroCopy) {
+        g.renderer->setPostCallback(onPost, nullptr, true /* BGRA readback */, 0);
+    }
+    VLOG("frame delivery: %s", zeroCopy ? "zero-copy IOSurface blit" : "readback");
 
     g.initialized = true;
     return 0;
+}
+
+extern "C" void vagfx_request_readback_fallback(void) {
+    static std::atomic<bool> requested{false};
+    if (requested.exchange(true)) return;
+    // Called from inside a post (FrameBuffer lock held): switch on another thread.
+    std::thread([] {
+        vagfx_present_gl_disable();
+        if (g.renderer) g.renderer->setPostCallback(onPost, nullptr, true, 0);
+        VLOG("frame delivery: fell back to readback");
+    }).detach();
 }
 
 extern "C" __attribute__((visibility("default"))) void va_gfx_register_pipe_services(void) {
@@ -824,6 +846,7 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_get_gles_version(in
 
 extern "C" __attribute__((visibility("default"))) void va_gfx_teardown(void) {
     if (!g.initialized) return;
+    vagfx_present_gl_disable();
     if (g.renderer) {
         g.renderer->setPostCallback(nullptr, nullptr, false, 0);
         g.renderer->finish();

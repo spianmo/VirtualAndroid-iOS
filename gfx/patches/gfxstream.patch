@@ -1,3 +1,79 @@
+diff --git a/host/ColorBuffer.cpp b/host/ColorBuffer.cpp
+index 0ec2e5c..ab0ab31 100644
+--- a/host/ColorBuffer.cpp
++++ b/host/ColorBuffer.cpp
+@@ -492,6 +492,12 @@ GLuint ColorBuffer::glOpGetTexture() {
+     return mColorBufferGl->getTexture();
+ }
+ 
++void ColorBuffer::glOpWaitSync() {
++    if (mColorBufferGl) {
++        mColorBufferGl->waitSync();
++    }
++}
++
+ void ColorBuffer::glOpReadback(unsigned char* img, bool readbackBgra) {
+     if (!mColorBufferGl) {
+         GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) << "ColorBufferGl not available.";
+diff --git a/host/ColorBuffer.h b/host/ColorBuffer.h
+index 51edfe4..ee876bb 100644
+--- a/host/ColorBuffer.h
++++ b/host/ColorBuffer.h
+@@ -96,6 +96,8 @@ class ColorBuffer : public android::snapshot::LazySnapshotObj<ColorBuffer> {
+ 
+ #if GFXSTREAM_ENABLE_HOST_GLES
+     GLuint glOpGetTexture();
++    // VirtualAndroid: waits for pending producer work (EGL image fence).
++    void glOpWaitSync();
+     bool glOpBlitFromCurrentReadBuffer();
+     bool glOpBindToTexture();
+     bool glOpBindToTexture2();
+diff --git a/host/FrameBuffer.cpp b/host/FrameBuffer.cpp
+index c8cdcaa..368a210 100644
+--- a/host/FrameBuffer.cpp
++++ b/host/FrameBuffer.cpp
+@@ -1788,6 +1788,22 @@ bool FrameBuffer::postImplSync(HandleType p_colorbuffer, bool needLockAndBind, b
+     return posted.Succeeded();
+ }
+ 
++// VirtualAndroid: zero-copy presentation hook. Called for every post to
++// display 0 with the FrameBuffer's GL context current; |global_tex| is the
++// posted ColorBuffer's texture name in the underlying (host) GLES context.
++extern "C" {
++typedef void (*gfxstream_post_texture_hook_t)(void* ctx, uint32_t display_id,
++                                              uint32_t global_tex, uint32_t width,
++                                              uint32_t height);
++static gfxstream_post_texture_hook_t sPostTextureHook = nullptr;
++static void* sPostTextureHookCtx = nullptr;
++__attribute__((visibility("default"))) void gfxstream_set_post_texture_hook(
++    gfxstream_post_texture_hook_t hook, void* ctx) {
++    sPostTextureHookCtx = ctx;
++    sPostTextureHook = hook;
++}
++}
++
+ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer, Post::CompletionCallback callback,
+                                   bool needLockAndBind, bool repaint) {
+     ColorBufferPtr colorBuffer = nullptr;
+@@ -1851,6 +1867,18 @@ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer, Post::CompletionCall
+         }
+     }
+ 
++#if GFXSTREAM_ENABLE_HOST_GLES
++    if (sPostTextureHook && m_emulationGl) {
++        RecursiveScopedContextBind hookBind(getPbufferSurfaceContextHelper());
++        if (hookBind.isOk()) {
++            const GLuint tex = colorBuffer->glOpGetTexture();
++            colorBuffer->glOpWaitSync();
++            sPostTextureHook(sPostTextureHookCtx, 0, s_gles2.glGetGlobalTexName(tex),
++                             colorBuffer->getWidth(), colorBuffer->getHeight());
++        }
++    }
++#endif
++
+     //
+     // Send framebuffer (without FPS overlay) to callback
+     //
 diff --git a/host/NativeSubWindow_stub.cpp b/host/NativeSubWindow_stub.cpp
 index b413a31..4593ba9 100644
 --- a/host/NativeSubWindow_stub.cpp

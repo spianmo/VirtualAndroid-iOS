@@ -35,7 +35,7 @@ DEFS=(-DGFXSTREAM_ENABLE_HOST_GLES=1 -DGFXSTREAM_MESON_BUILD=1 -DGFXSTREAM_ENABL
 
 "$CC" "${COMMON[@]}" -std=c11 -I"$GFX/include" -I"$GFX/libva_gfx" -I"$ROOT/engine/qemu/include" \
   -c "$GFX/libva_gfx/va_gfx_pipe_shim.c" -o "$OBJ/va_gfx_pipe_shim.o"
-for f in va_gfx va_gfx_present; do
+for f in va_gfx va_gfx_present va_gfx_present_gl; do
   "$CXX" "${COMMON[@]}" -std=gnu++17 "${INC[@]}" "${DEFS[@]}" -Wno-extern-c-compat \
     -c "$GFX/libva_gfx/$f.cpp" -o "$OBJ/$f.o"
 done
@@ -60,7 +60,7 @@ fi
 "$CXX" "${COMMON[@]}" -dynamiclib -o "$OBJ/libva_gfx.dylib" \
   -install_name "$INSTALL_NAME" \
   -Wl,-exported_symbols_list,"$GFX/libva_gfx/exports.txt" -Wl,-dead_strip \
-  "$OBJ/va_gfx_pipe_shim.o" "$OBJ/va_gfx.o" "$OBJ/va_gfx_present.o" "$OBJ/aemu_VmLock.o" \
+  "$OBJ/va_gfx_pipe_shim.o" "$OBJ/va_gfx.o" "$OBJ/va_gfx_present.o" "$OBJ/va_gfx_present_gl.o" "$OBJ/aemu_VmLock.o" \
   "${LIBS[@]}" "${FW[@]}" -lc++
 echo "built $OBJ/libva_gfx.dylib"
 nm -gU "$OBJ/libva_gfx.dylib" | grep va_gfx

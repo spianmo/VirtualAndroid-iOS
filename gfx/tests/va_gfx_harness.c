@@ -488,6 +488,7 @@ int main(int argc, char **argv)
                 argv[0]);
         return 2;
     }
+    setvbuf(stdout, NULL, _IOLBF, 0);
     const char *backend = argc > 3 ? argv[3] : "angle";
     if (getenv("HARNESS_W")) W = atoi(getenv("HARNESS_W"));
     if (getenv("HARNESS_H")) H = atoi(getenv("HARNESS_H"));
@@ -688,13 +689,47 @@ int main(int argc, char **argv)
             (void)rc0(gl, OP_rcGetRendererVersion);
             bql_unlock();
             IOSurfaceRef f = wait_frame(3 + i);
-            if (f) CFRelease(f);
             bql_lock();
+            if (!f) {
+                CHECK(f, "throughput: frame %d never arrived", i);
+                break;
+            }
+            CFRelease(f);
         }
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
         printf("throughput: %d posted frames %dx%d in %.1f ms = %.2f ms/frame (%.1f fps)\n", n, W,
                H, ms, ms / n, n * 1000.0 / ms);
+    }
+    if (getenv("HARNESS_PROFILE")) {
+        const int n = 60;
+        struct timespec t0, t1;
+#define ELAPSED_MS() ((t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6)
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (int i = 0; i < n; i++) (void)rc0(gl, OP_rcGetRendererVersion);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        printf("profile: rc round trip %.2f ms\n", ELAPSED_MS() / n);
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (int i = 0; i < n; i++) {
+            gl_clear_color(gl, (float)i / n, 0.5f, 0.5f, 1.0f);
+            rcN(gl, OP_glClear, 0, 1, 0x4000);
+            (void)rcN(gl, OP_rcFlushWindowColorBuffer, 1, 1, surf);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        printf("profile: clear+flushWindowColorBuffer %.2f ms\n", ELAPSED_MS() / n);
+        int base = s_frames;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (int i = 0; i < n; i++) {
+            rcN(gl, OP_rcFBPost, 0, 1, cb2);
+            (void)rc0(gl, OP_rcGetRendererVersion);
+            bql_unlock();
+            IOSurfaceRef f = wait_frame(base + i + 1);
+            bql_lock();
+            if (!f) break;
+            CFRelease(f);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        printf("profile: post+readback+present %.2f ms\n", ELAPSED_MS() / n);
     }
     const int frames_before_compose = s_frames;
 

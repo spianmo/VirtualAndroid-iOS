@@ -26,7 +26,13 @@ std::mutex sLock;
 VaGfxPresentFn sFn = nullptr;
 void* sOpaque = nullptr;
 std::vector<IOSurfaceRef> sPool;
+// Retain count / use count of each pooled surface when the embedder does not
+// hold it. Sampled right before each hand-off, because the GPU path (ANGLE /
+// Metal) takes its own references lazily.
+std::vector<CFIndex> sIdleRetain;
+std::vector<int32_t> sIdleUse;
 size_t sNext = 0;
+uint64_t sGeneration = 0;
 int sWidth = 0;
 int sHeight = 0;
 uint64_t sFrameNumber = 0;
@@ -54,12 +60,30 @@ IOSurfaceRef createSurface(int width, int height) {
 void clearPoolLocked() {
     for (auto s : sPool) CFRelease(s);
     sPool.clear();
+    sIdleRetain.clear();
+    sIdleUse.clear();
     sNext = 0;
+    sGeneration++;
 }
 
-bool isFree(IOSurfaceRef s) {
-    // Our pool holds exactly one reference.
-    return !IOSurfaceIsInUse(s) && CFGetRetainCount(s) == 1;
+void addToPoolLocked(IOSurfaceRef s) {
+    sPool.push_back(s);
+    sIdleRetain.push_back(1);  // our pool's own reference
+    sIdleUse.push_back(0);
+}
+
+void sampleIdleLocked(IOSurfaceRef s) {
+    for (size_t i = 0; i < sPool.size(); i++) {
+        if (sPool[i] == s) {
+            sIdleRetain[i] = CFGetRetainCount(s);
+            sIdleUse[i] = IOSurfaceGetUseCount(s);
+        }
+    }
+}
+
+bool isFree(size_t idx) {
+    IOSurfaceRef s = sPool[idx];
+    return IOSurfaceGetUseCount(s) <= sIdleUse[idx] && CFGetRetainCount(s) <= sIdleRetain[idx];
 }
 
 IOSurfaceRef acquireLocked(int width, int height) {
@@ -70,7 +94,7 @@ IOSurfaceRef acquireLocked(int width, int height) {
     }
     for (size_t i = 0; i < sPool.size(); i++) {
         size_t idx = (sNext + i) % sPool.size();
-        if (isFree(sPool[idx])) {
+        if (isFree(idx)) {
             sNext = (idx + 1) % sPool.size();
             return sPool[idx];
         }
@@ -78,7 +102,7 @@ IOSurfaceRef acquireLocked(int width, int height) {
     if (sPool.size() < kMaxSurfaces) {
         IOSurfaceRef s = createSurface(width, height);
         if (s) {
-            sPool.push_back(s);
+            addToPoolLocked(s);
             sNext = 0;
             return s;
         }
@@ -95,7 +119,7 @@ extern "C" void vagfx_present_init(int width, int height, VaGfxPresentFn fn, voi
     sWidth = width;
     sHeight = height;
     for (int i = 0; i < 3; i++) {
-        if (IOSurfaceRef s = createSurface(width, height)) sPool.push_back(s);
+        if (IOSurfaceRef s = createSurface(width, height)) addToPoolLocked(s);
     }
 }
 
@@ -122,9 +146,36 @@ extern "C" void vagfx_present_frame(int width, int height, int ydir, const unsig
         }
     }
     IOSurfaceUnlock(s, 0, nullptr);
+    sampleIdleLocked(s);
 
     VaGfxFrame frame;
     frame.iosurface = (void*)s;
+    frame.width = width;
+    frame.height = height;
+    frame.rotation_deg = 0;
+    frame.frame_number = ++sFrameNumber;
+    sFn(sOpaque, &frame);
+}
+
+extern "C" void* vagfx_present_acquire(int width, int height, uint64_t* generation) {
+    std::lock_guard<std::mutex> lock(sLock);
+    if (!sFn || width <= 0 || height <= 0) return nullptr;
+    IOSurfaceRef s = acquireLocked(width, height);
+    if (generation) *generation = sGeneration;
+    return (void*)s;
+}
+
+extern "C" void vagfx_present_mark_idle(void* iosurface) {
+    std::lock_guard<std::mutex> lock(sLock);
+    sampleIdleLocked((IOSurfaceRef)iosurface);
+}
+
+extern "C" void vagfx_present_submit(void* iosurface, int width, int height) {
+    std::lock_guard<std::mutex> lock(sLock);
+    if (!sFn || !iosurface) return;
+    sampleIdleLocked((IOSurfaceRef)iosurface);
+    VaGfxFrame frame;
+    frame.iosurface = iosurface;
     frame.width = width;
     frame.height = height;
     frame.rotation_deg = 0;
