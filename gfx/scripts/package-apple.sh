@@ -28,7 +28,9 @@ PL
 
 if [ "$PLATFORM" = "xcframework" ]; then
   OUT="$GFX/build-ios-xcframeworks"; rm -rf "$OUT"; mkdir -p "$OUT"
-  for fw in va_gfx GLESv2; do
+  FWS="va_gfx GLESv2"
+  [ -d "$GFX/build-ios/dist/MoltenVK.framework" ] && [ -d "$GFX/build-ios-sim/dist/MoltenVK.framework" ] && FWS="$FWS MoltenVK"
+  for fw in $FWS; do
     xcodebuild -create-xcframework \
       -framework "$GFX/build-ios/dist/$fw.framework" \
       -framework "$GFX/build-ios-sim/dist/$fw.framework" \
@@ -44,6 +46,7 @@ if [ "$PLATFORM" = "macos" ]; then
   cp "$B/libva_gfx/libva_gfx.dylib" "$DIST/"
   cp "$B/prefix/lib/libGLESv2.dylib" "$DIST/"
   install_name_tool -id @rpath/libGLESv2.dylib "$DIST/libGLESv2.dylib" 2>/dev/null
+  [ -f "$B/prefix/lib/libMoltenVK.dylib" ] && cp "$B/prefix/lib/libMoltenVK.dylib" "$DIST/"
   codesign -f -s - "$DIST"/*.dylib
 else
   case "$PLATFORM" in ios) PL=iPhoneOS ;; ios-sim) PL=iPhoneSimulator ;; esac
@@ -56,6 +59,10 @@ else
   rsync -a "$B/prefix/include/angle/GLES2" "$B/prefix/include/angle/GLES3" \
         "$B/prefix/include/angle/EGL" "$B/prefix/include/angle/KHR" "$DIST/GLESv2.framework/Headers/"
   plist GLESv2 org.virtualandroid.angle-glesv2 "$PL" > "$DIST/GLESv2.framework/Info.plist"
+  if [ -d "$B/prefix/MoltenVK.framework" ]; then
+    cp -a "$B/prefix/MoltenVK.framework" "$DIST/"
+    codesign -f -s - "$DIST/MoltenVK.framework"
+  fi
   codesign -f -s - "$DIST/va_gfx.framework" "$DIST/GLESv2.framework"
 fi
 find "$DIST" -maxdepth 2 | sort
