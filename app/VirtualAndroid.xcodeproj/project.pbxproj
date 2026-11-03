@@ -1,0 +1,532 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		00F7D2AFB5299A223E5EAA3F /* CameraBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ABEDDE583E5BC3EBD38A7BF /* CameraBridge.swift */; };
+		113B8AA3C5A6206D1BC1EFE1 /* VMScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDAD3A28871A6E75A5B5843 /* VMScreen.swift */; };
+		12BEB44215D3D9AD86FBF617 /* DisplayGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13A7C848952714EDE173079 /* DisplayGeometry.swift */; };
+		134EE4006C80A141DD1A5505 /* StubEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B93BCB793456B312A3CA6071 /* StubEngine.swift */; };
+		13E06823004CFC013C1CADF1 /* QemuArguments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B8DDA5F0759694FFC108E05 /* QemuArguments.swift */; };
+		20E2BBBF9846DCB5E475ECED /* MotionBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0E6B20776EF56653947C0C6 /* MotionBridge.swift */; };
+		28884D22C60CE8E6F14BE1C1 /* VAEngineRuntime.m in Sources */ = {isa = PBXBuildFile; fileRef = 7C68EC4654392BF4E915E6B2 /* VAEngineRuntime.m */; };
+		2939CD2A2F11668F3F532C58 /* HapticsBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AEB2D0D71B3AF24B6B4999 /* HapticsBridge.swift */; };
+		2AE4103B01EE91C48510E2D8 /* QMPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09CF32C012D3E489C68B8163 /* QMPClient.swift */; };
+		2CDF2F2870D4561F5B76359C /* QemuEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11CE7D09E664C3D31ED2D020 /* QemuEngine.swift */; };
+		508B2FE3CD1304DD87375FE6 /* LinuxKeymap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 324F7D4365E8B9C8EF578E0F /* LinuxKeymap.swift */; };
+		73C763FC54C2E1CED60C4144 /* LocationBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0BB360572329D0B77B296BD /* LocationBridge.swift */; };
+		786E1B1A9D5805DB98BBB02E /* VMStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7EEB024F237017E3FB9648D /* VMStorage.swift */; };
+		7D2852C0762EBFDBA25E81C3 /* BatteryBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7611DD2037B250075CCA2648 /* BatteryBridge.swift */; };
+		7F7A62DB9B1DF31F870E9DB4 /* VMController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AEDE463D118D3ABD1A746FB /* VMController.swift */; };
+		8DDD568B3337CDF0553C6A17 /* SnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 051BF7C63D2D1F7FAE2646C9 /* SnapshotStore.swift */; };
+		904B41C6D5D4A4B33D7CE8C9 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EDF9409366C9FE111CA6AEF /* HomeView.swift */; };
+		ACA6C05C1CAEE01E98CAE626 /* HostBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EDDF11BD258C91FE07267F2 /* HostBridge.swift */; };
+		BBA79FBF0FE7B641D9892EFF /* VirtualAndroidApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E7043FFBF44189BD8C41198 /* VirtualAndroidApp.swift */; };
+		BDAFDA44DC31F0A020293282 /* Engine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AED049B29CD088744732AF7A /* Engine.swift */; };
+		C6406351C43E01AFA8157560 /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = B2CBE08EC6FFC826E03B1F6B /* Shaders.metal */; };
+		CC24936998CC89B6F23FE135 /* NavOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A7ADBDCDC7C23C48A762CF8 /* NavOverlay.swift */; };
+		CC4E811B1EA76698087003F3 /* MetalDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FCA81FECD888DC17CB086DF /* MetalDisplayView.swift */; };
+		D6D6997D4AFCCE0A3FEF59AD /* BootConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F1531474E45B03BE54E5CE7 /* BootConfig.swift */; };
+		E4F4574297B91EA5C62A2C93 /* AudioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61BD34C5D6F3EF60160E74D7 /* AudioBridge.swift */; };
+		EF61B50EF93170A770768950 /* ClipboardBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A2D830D890D134ABD4B6187 /* ClipboardBridge.swift */; };
+		F061E6E23E66C59A62EEE353 /* VARingBuffer.c in Sources */ = {isa = PBXBuildFile; fileRef = 603048A9109FC53793A98FE3 /* VARingBuffer.c */; };
+		F71AFEE42AB0B684DE3C6221 /* DisplayContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71AAECD13BE1465A01A256FC /* DisplayContainer.swift */; };
+		F7E33998DF4807F00460414D /* DiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86E16100EF32AB027A2878F7 /* DiagnosticsView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		051BF7C63D2D1F7FAE2646C9 /* SnapshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotStore.swift; sourceTree = "<group>"; };
+		09CF32C012D3E489C68B8163 /* QMPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QMPClient.swift; sourceTree = "<group>"; };
+		11CE7D09E664C3D31ED2D020 /* QemuEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QemuEngine.swift; sourceTree = "<group>"; };
+		1A7ADBDCDC7C23C48A762CF8 /* NavOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavOverlay.swift; sourceTree = "<group>"; };
+		1ABEDDE583E5BC3EBD38A7BF /* CameraBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraBridge.swift; sourceTree = "<group>"; };
+		1C424578983F40828262957C /* VAEngineRuntime.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VAEngineRuntime.h; sourceTree = "<group>"; };
+		1EF996CA9CF335A4A55E1337 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		2FCA81FECD888DC17CB086DF /* MetalDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalDisplayView.swift; sourceTree = "<group>"; };
+		324F7D4365E8B9C8EF578E0F /* LinuxKeymap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinuxKeymap.swift; sourceTree = "<group>"; };
+		4E7043FFBF44189BD8C41198 /* VirtualAndroidApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualAndroidApp.swift; sourceTree = "<group>"; };
+		5AEDE463D118D3ABD1A746FB /* VMController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VMController.swift; sourceTree = "<group>"; };
+		5EDDF11BD258C91FE07267F2 /* HostBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostBridge.swift; sourceTree = "<group>"; };
+		603048A9109FC53793A98FE3 /* VARingBuffer.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = VARingBuffer.c; sourceTree = "<group>"; };
+		61BD34C5D6F3EF60160E74D7 /* AudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioBridge.swift; sourceTree = "<group>"; };
+		6CE6491D7ADE3A78CC288A40 /* VirtualAndroid-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "VirtualAndroid-Bridging-Header.h"; sourceTree = "<group>"; };
+		6DFADDEFEAABAAE2B0AE4F57 /* VirtualAndroid-Debug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "VirtualAndroid-Debug.entitlements"; sourceTree = "<group>"; };
+		6EB1629B36469CCDE4BF656F /* VirtualAndroid.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VirtualAndroid.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6F1531474E45B03BE54E5CE7 /* BootConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BootConfig.swift; sourceTree = "<group>"; };
+		71AAECD13BE1465A01A256FC /* DisplayContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayContainer.swift; sourceTree = "<group>"; };
+		7611DD2037B250075CCA2648 /* BatteryBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryBridge.swift; sourceTree = "<group>"; };
+		7C68EC4654392BF4E915E6B2 /* VAEngineRuntime.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = VAEngineRuntime.m; sourceTree = "<group>"; };
+		86E16100EF32AB027A2878F7 /* DiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
+		8A2D830D890D134ABD4B6187 /* ClipboardBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardBridge.swift; sourceTree = "<group>"; };
+		8EDF9409366C9FE111CA6AEF /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		9B8DDA5F0759694FFC108E05 /* QemuArguments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QemuArguments.swift; sourceTree = "<group>"; };
+		A13A7C848952714EDE173079 /* DisplayGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayGeometry.swift; sourceTree = "<group>"; };
+		AED049B29CD088744732AF7A /* Engine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Engine.swift; sourceTree = "<group>"; };
+		B2CBE08EC6FFC826E03B1F6B /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
+		B93BCB793456B312A3CA6071 /* StubEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StubEngine.swift; sourceTree = "<group>"; };
+		BEF619F6803FBA95E3EA9D4C /* VARingBuffer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VARingBuffer.h; sourceTree = "<group>"; };
+		C0AEB2D0D71B3AF24B6B4999 /* HapticsBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HapticsBridge.swift; sourceTree = "<group>"; };
+		DF2F857D69D195CCA74DA404 /* VirtualAndroid.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VirtualAndroid.entitlements; sourceTree = "<group>"; };
+		E0BB360572329D0B77B296BD /* LocationBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationBridge.swift; sourceTree = "<group>"; };
+		E0E6B20776EF56653947C0C6 /* MotionBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionBridge.swift; sourceTree = "<group>"; };
+		EDDAD3A28871A6E75A5B5843 /* VMScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VMScreen.swift; sourceTree = "<group>"; };
+		F7EEB024F237017E3FB9648D /* VMStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VMStorage.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		12168294CF7233655EFFB2FF /* VirtualAndroid */ = {
+			isa = PBXGroup;
+			children = (
+				65DFC2C5F679DF907222F445 /* App */,
+				74E16D71D63F2E463CE73C39 /* Bridges */,
+				91C15715F02507D6E25932A0 /* Display */,
+				79A880F19B95EC55EE995901 /* Engine */,
+				5D70A95CF7E03FC031902B62 /* Input */,
+				DDDC6BB0E975AA5F5EA7BB51 /* Support */,
+				9B215F3861C47BC719437E06 /* UI */,
+				9B35DC53FAE4BF747F04C988 /* VM */,
+			);
+			path = VirtualAndroid;
+			sourceTree = "<group>";
+		};
+		49E94C8CA3D25FCF1AC8524F = {
+			isa = PBXGroup;
+			children = (
+				12168294CF7233655EFFB2FF /* VirtualAndroid */,
+				EBEFC6C6DF62200BC6AFEF9A /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		5D70A95CF7E03FC031902B62 /* Input */ = {
+			isa = PBXGroup;
+			children = (
+				324F7D4365E8B9C8EF578E0F /* LinuxKeymap.swift */,
+			);
+			path = Input;
+			sourceTree = "<group>";
+		};
+		65DFC2C5F679DF907222F445 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				4E7043FFBF44189BD8C41198 /* VirtualAndroidApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		74E16D71D63F2E463CE73C39 /* Bridges */ = {
+			isa = PBXGroup;
+			children = (
+				61BD34C5D6F3EF60160E74D7 /* AudioBridge.swift */,
+				7611DD2037B250075CCA2648 /* BatteryBridge.swift */,
+				1ABEDDE583E5BC3EBD38A7BF /* CameraBridge.swift */,
+				8A2D830D890D134ABD4B6187 /* ClipboardBridge.swift */,
+				C0AEB2D0D71B3AF24B6B4999 /* HapticsBridge.swift */,
+				5EDDF11BD258C91FE07267F2 /* HostBridge.swift */,
+				E0BB360572329D0B77B296BD /* LocationBridge.swift */,
+				E0E6B20776EF56653947C0C6 /* MotionBridge.swift */,
+			);
+			path = Bridges;
+			sourceTree = "<group>";
+		};
+		79A880F19B95EC55EE995901 /* Engine */ = {
+			isa = PBXGroup;
+			children = (
+				AED049B29CD088744732AF7A /* Engine.swift */,
+				11CE7D09E664C3D31ED2D020 /* QemuEngine.swift */,
+				B93BCB793456B312A3CA6071 /* StubEngine.swift */,
+			);
+			path = Engine;
+			sourceTree = "<group>";
+		};
+		91C15715F02507D6E25932A0 /* Display */ = {
+			isa = PBXGroup;
+			children = (
+				71AAECD13BE1465A01A256FC /* DisplayContainer.swift */,
+				A13A7C848952714EDE173079 /* DisplayGeometry.swift */,
+				2FCA81FECD888DC17CB086DF /* MetalDisplayView.swift */,
+				B2CBE08EC6FFC826E03B1F6B /* Shaders.metal */,
+			);
+			path = Display;
+			sourceTree = "<group>";
+		};
+		9B215F3861C47BC719437E06 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				86E16100EF32AB027A2878F7 /* DiagnosticsView.swift */,
+				8EDF9409366C9FE111CA6AEF /* HomeView.swift */,
+				1A7ADBDCDC7C23C48A762CF8 /* NavOverlay.swift */,
+				EDDAD3A28871A6E75A5B5843 /* VMScreen.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		9B35DC53FAE4BF747F04C988 /* VM */ = {
+			isa = PBXGroup;
+			children = (
+				6F1531474E45B03BE54E5CE7 /* BootConfig.swift */,
+				9B8DDA5F0759694FFC108E05 /* QemuArguments.swift */,
+				09CF32C012D3E489C68B8163 /* QMPClient.swift */,
+				051BF7C63D2D1F7FAE2646C9 /* SnapshotStore.swift */,
+				5AEDE463D118D3ABD1A746FB /* VMController.swift */,
+				F7EEB024F237017E3FB9648D /* VMStorage.swift */,
+			);
+			path = VM;
+			sourceTree = "<group>";
+		};
+		DDDC6BB0E975AA5F5EA7BB51 /* Support */ = {
+			isa = PBXGroup;
+			children = (
+				1EF996CA9CF335A4A55E1337 /* Info.plist */,
+				1C424578983F40828262957C /* VAEngineRuntime.h */,
+				7C68EC4654392BF4E915E6B2 /* VAEngineRuntime.m */,
+				603048A9109FC53793A98FE3 /* VARingBuffer.c */,
+				BEF619F6803FBA95E3EA9D4C /* VARingBuffer.h */,
+				6CE6491D7ADE3A78CC288A40 /* VirtualAndroid-Bridging-Header.h */,
+				6DFADDEFEAABAAE2B0AE4F57 /* VirtualAndroid-Debug.entitlements */,
+				DF2F857D69D195CCA74DA404 /* VirtualAndroid.entitlements */,
+			);
+			path = Support;
+			sourceTree = "<group>";
+		};
+		EBEFC6C6DF62200BC6AFEF9A /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				6EB1629B36469CCDE4BF656F /* VirtualAndroid.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		7397AF641FC28E2A38BDE5D5 /* VirtualAndroid */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0DFBA1AA5B0C570F7A39FAEE /* Build configuration list for PBXNativeTarget "VirtualAndroid" */;
+			buildPhases = (
+				9E96B772C7855DBFB2D37283 /* Sources */,
+				FA3CC3F18BF2FBDF2CF23AFD /* Embed engine frameworks (if built) */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VirtualAndroid;
+			packageProductDependencies = (
+			);
+			productName = VirtualAndroid;
+			productReference = 6EB1629B36469CCDE4BF656F /* VirtualAndroid.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		69DFE9CB3843034F9117A831 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					7397AF641FC28E2A38BDE5D5 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = D0FB86F5C10ACA5E501EA253 /* Build configuration list for PBXProject "VirtualAndroid" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 49E94C8CA3D25FCF1AC8524F;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = EBEFC6C6DF62200BC6AFEF9A /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7397AF641FC28E2A38BDE5D5 /* VirtualAndroid */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		FA3CC3F18BF2FBDF2CF23AFD /* Embed engine frameworks (if built) */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Embed engine frameworks (if built)";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/scripts/embed_engine_frameworks.sh\"";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		9E96B772C7855DBFB2D37283 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E4F4574297B91EA5C62A2C93 /* AudioBridge.swift in Sources */,
+				7D2852C0762EBFDBA25E81C3 /* BatteryBridge.swift in Sources */,
+				D6D6997D4AFCCE0A3FEF59AD /* BootConfig.swift in Sources */,
+				00F7D2AFB5299A223E5EAA3F /* CameraBridge.swift in Sources */,
+				EF61B50EF93170A770768950 /* ClipboardBridge.swift in Sources */,
+				F7E33998DF4807F00460414D /* DiagnosticsView.swift in Sources */,
+				F71AFEE42AB0B684DE3C6221 /* DisplayContainer.swift in Sources */,
+				12BEB44215D3D9AD86FBF617 /* DisplayGeometry.swift in Sources */,
+				BDAFDA44DC31F0A020293282 /* Engine.swift in Sources */,
+				2939CD2A2F11668F3F532C58 /* HapticsBridge.swift in Sources */,
+				904B41C6D5D4A4B33D7CE8C9 /* HomeView.swift in Sources */,
+				ACA6C05C1CAEE01E98CAE626 /* HostBridge.swift in Sources */,
+				508B2FE3CD1304DD87375FE6 /* LinuxKeymap.swift in Sources */,
+				73C763FC54C2E1CED60C4144 /* LocationBridge.swift in Sources */,
+				CC4E811B1EA76698087003F3 /* MetalDisplayView.swift in Sources */,
+				20E2BBBF9846DCB5E475ECED /* MotionBridge.swift in Sources */,
+				CC24936998CC89B6F23FE135 /* NavOverlay.swift in Sources */,
+				2AE4103B01EE91C48510E2D8 /* QMPClient.swift in Sources */,
+				13E06823004CFC013C1CADF1 /* QemuArguments.swift in Sources */,
+				2CDF2F2870D4561F5B76359C /* QemuEngine.swift in Sources */,
+				C6406351C43E01AFA8157560 /* Shaders.metal in Sources */,
+				8DDD568B3337CDF0553C6A17 /* SnapshotStore.swift in Sources */,
+				134EE4006C80A141DD1A5505 /* StubEngine.swift in Sources */,
+				28884D22C60CE8E6F14BE1C1 /* VAEngineRuntime.m in Sources */,
+				F061E6E23E66C59A62EEE353 /* VARingBuffer.c in Sources */,
+				7F7A62DB9B1DF31F870E9DB4 /* VMController.swift in Sources */,
+				113B8AA3C5A6206D1BC1EFE1 /* VMScreen.swift in Sources */,
+				786E1B1A9D5805DB98BBB02E /* VMStorage.swift in Sources */,
+				BBA79FBF0FE7B641D9892EFF /* VirtualAndroidApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		814ED11224335658040F639B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_ENTITLEMENTS = VirtualAndroid/Support/VirtualAndroid.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_BITCODE = NO;
+				GCC_PREPROCESSOR_DEFINITIONS = "$(inherited) VA_APP=1";
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/../host/include",
+					"$(SRCROOT)/../gfx/include",
+					"$(SRCROOT)/VirtualAndroid/Support",
+				);
+				INFOPLIST_FILE = VirtualAndroid/Support/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.virtualandroid.app;
+				PRODUCT_NAME = VirtualAndroid;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
+				SWIFT_OBJC_BRIDGING_HEADER = "VirtualAndroid/Support/VirtualAndroid-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		83EA96794FBFAAC3B2F6BC71 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		8DCF2806A4F90F77C3CDD788 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A078ABE7E8407F3DD35FBC95 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_ENTITLEMENTS = "VirtualAndroid/Support/VirtualAndroid-Debug.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_BITCODE = NO;
+				GCC_PREPROCESSOR_DEFINITIONS = "$(inherited) VA_APP=1";
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/../host/include",
+					"$(SRCROOT)/../gfx/include",
+					"$(SRCROOT)/VirtualAndroid/Support",
+				);
+				INFOPLIST_FILE = VirtualAndroid/Support/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.virtualandroid.app;
+				PRODUCT_NAME = VirtualAndroid;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";
+				SWIFT_OBJC_BRIDGING_HEADER = "VirtualAndroid/Support/VirtualAndroid-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0DFBA1AA5B0C570F7A39FAEE /* Build configuration list for PBXNativeTarget "VirtualAndroid" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A078ABE7E8407F3DD35FBC95 /* Debug */,
+				814ED11224335658040F639B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D0FB86F5C10ACA5E501EA253 /* Build configuration list for PBXProject "VirtualAndroid" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8DCF2806A4F90F77C3CDD788 /* Debug */,
+				83EA96794FBFAAC3B2F6BC71 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 69DFE9CB3843034F9117A831 /* Project object */;
+}
