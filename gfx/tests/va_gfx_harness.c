@@ -135,11 +135,20 @@ static int s_timeline_incs = 0;
 
 static uint64_t eng_sync_create_timeline(void) { return s_next_timeline++; }
 static int eng_sync_create_fence(uint64_t tl, uint32_t pt) { (void)tl; (void)pt; return -1; }
+static pthread_mutex_t s_sync_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t s_sync_cond = PTHREAD_COND_INITIALIZER;
+static uint64_t s_last_inc_timeline = 0;
+static uint32_t s_last_inc_count = 0;
+
 static void eng_sync_timeline_inc(uint64_t tl, uint32_t n)
 {
-    (void)tl; (void)n;
     /* allowed from any thread, with or without the BQL (goldfish_sync.h) */
+    pthread_mutex_lock(&s_sync_lock);
     s_timeline_incs++;
+    s_last_inc_timeline = tl;
+    s_last_inc_count = n;
+    pthread_cond_broadcast(&s_sync_cond);
+    pthread_mutex_unlock(&s_sync_lock);
 }
 static void eng_sync_destroy_timeline(uint64_t tl) { (void)tl; }
 static void eng_sync_register_trigger_wait(void (*fn)(uint64_t, uint64_t, uint64_t))
@@ -297,6 +306,7 @@ enum {
     OP_rcFBPost = 10018,
     OP_rcUpdateColorBuffer = 10024,
     OP_rcCompose = 10037,
+    OP_rcCreateSyncKHR = 10029,
     OP_glClear = 2063,
     OP_glClearColor = 2064,
     OP_glDisable = 2086,
@@ -675,6 +685,48 @@ int main(int argc, char **argv)
         CFRelease(f2);
     }
     bql_lock();
+
+    /* --- goldfish sync: native fence -> TRIGGER_HOST_WAIT -> timeline_inc --- */
+    {
+        const int32_t attribs[] = { 0x3145 /* EGL_SYNC_NATIVE_FENCE_FD_ANDROID */,
+                                    -1 /* EGL_NO_NATIVE_FENCE_FD_ANDROID */, 0x3038 };
+        Packet pk = pk_begin(OP_rcCreateSyncKHR);
+        pk_u32(&pk, 0x3144); /* EGL_SYNC_NATIVE_FENCE_ANDROID */
+        pk_u32(&pk, sizeof(attribs));
+        pk_bytes(&pk, attribs, sizeof(attribs));
+        pk_u32(&pk, sizeof(attribs));
+        pk_u32(&pk, 1);  /* destroy_when_signaled */
+        pk_u32(&pk, 8);  /* glsync_out size */
+        pk_u32(&pk, 8);  /* syncthread_out size */
+        pk_send(gl, &pk);
+        uint64_t glsync = 0, syncthread = 0;
+        guest_read(gl, &glsync, 8);
+        guest_read(gl, &syncthread, 8);
+        printf("rcCreateSyncKHR: glsync=0x%llx syncthread=0x%llx\n", (unsigned long long)glsync,
+               (unsigned long long)syncthread);
+        CHECK(glsync && syncthread, "rcCreateSyncKHR handles");
+        CHECK(s_trigger_wait != NULL, "trigger_wait not registered");
+        if (glsync && s_trigger_wait) {
+            const uint64_t timeline = 0x4242;
+            /* what goldfish_sync does on CMD_TRIGGER_HOST_WAIT (vCPU, BQL held) */
+            s_trigger_wait(glsync, syncthread, timeline);
+            bql_unlock();
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 5;
+            pthread_mutex_lock(&s_sync_lock);
+            while (s_last_inc_timeline != timeline &&
+                   pthread_cond_timedwait(&s_sync_cond, &s_sync_lock, &ts) != ETIMEDOUT) {
+            }
+            const int got = s_last_inc_timeline == timeline;
+            const uint32_t count = s_last_inc_count;
+            pthread_mutex_unlock(&s_sync_lock);
+            bql_lock();
+            printf("goldfish sync: timeline_inc(0x%llx, %u) %s\n", (unsigned long long)timeline,
+                   count, got ? "received" : "NOT received");
+            CHECK(got && count == 1, "fence signal via timeline_inc");
+        }
+    }
 
     /* --- Throughput: GLES clear + flush + post, waiting for each IOSurface frame --- */
     {
