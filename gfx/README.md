@@ -27,10 +27,13 @@ ColorBuffer posted (rcFBPost / rcCompose) ─ GPU blit into IOSurface pbuffer �
 | macOS arm64 | native CGL (`gles_backend="native"`) | upload/GLES frames pass; host compositor shaders need ANGLE's shader translator, so use ANGLE |
 | macOS arm64 | + Vulkan via MoltenVK | host advertises `ANDROID_EMU_vulkan` (tested with the SDK's prebuilt MoltenVK) |
 | iOS simulator arm64 | ANGLE Metal (`build-ios-sim/dist`) | harness passes inside the simulator (`simctl spawn`); 1080x2340 1.29 ms zero-copy vs 165 ms readback |
+| iOS simulator arm64 | + Vulkan via MoltenVK 1.4.2 (source build) | host advertises `ANDROID_EMU_vulkan`, VkDevice on "Apple iOS simulator GPU" |
 | iOS device arm64 | ANGLE Metal (`build-ios/dist`) | builds; not run (needs a device) |
 
-xcframeworks: `build-ios-xcframeworks/{va_gfx,GLESv2}.xcframework` (device + simulator).
-Vulkan on iOS needs MoltenVK built for iOS (not done yet; see next steps).
+xcframeworks: `build-ios-xcframeworks/{va_gfx,GLESv2[,MoltenVK]}.xcframework` (device + simulator).
+The harness also checks goldfish sync end to end (rcCreateSyncKHR → the
+registered trigger_wait → `sync_timeline_inc` from gfxstream's SyncThread)
+and the BQL rules below (it counts engine calls made without the BQL).
 
 ## Building
 
@@ -41,6 +44,7 @@ for P in macos ios-sim ios; do
   gfx/scripts/build-aemu.sh $P          # CMake, static
   gfx/scripts/build-gfxstream.sh $P     # meson, static (cross file generated for iOS)
   gfx/scripts/build-angle.sh $P         # xcodebuild (needs: xcodebuild -downloadComponent MetalToolchain)
+  gfx/scripts/build-moltenvk.sh $P      # optional, Vulkan: KhronosGroup MoltenVK v1.4.2
   gfx/libva_gfx/build.sh $P             # glue + static gfxstream/aemu -> libva_gfx.dylib
   gfx/scripts/package-apple.sh $P       # -> build-$P/dist
 done
