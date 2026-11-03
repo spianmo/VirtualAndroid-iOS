@@ -64,6 +64,7 @@ final class VMController: ObservableObject, EngineDelegate {
         // Developer overrides (launch arguments, e.g. `-VAMachine virt -VAAutoStopAfter 90`).
         static let machine = "VAMachine", autoStopAfter = "VAAutoStopAfter"
         static let forceOrientation = "VAForceOrientation", selfTest = "VASelfTest"
+        static let stubDiagnostics = "VAStubDiagnostics"     // e.g. "gnss,camera,mic,tone,sensors,vibrate,copy"
     }
 
     init() {
@@ -447,6 +448,24 @@ final class VMController: ObservableObject, EngineDelegate {
             if let start = bootStart, bootSeconds == nil {
                 bootSeconds = Date().timeIntervalSince(start)
                 log(1, String(format: "boot completed in %.1f s", bootSeconds!))
+            }
+            if let list = defaults.string(forKey: Keys.stubDiagnostics), let diag = stubDiagnostics {
+                let items = Set(list.split(separator: ",").map { String($0) })
+                var st = StubDiagnosticsState()
+                st.gnss = items.contains("gnss")
+                st.camera = items.contains("camera")
+                st.mic = items.contains("mic")
+                st.tone = items.contains("tone")
+                st.allSensors = items.contains("sensors")
+                diag.setDiagnostics(st)
+                if items.contains("vibrate") { diag.diagnosticVibrate() }
+                if items.contains("copy") { diag.diagnosticGuestCopy() }
+                log(1, "stub diagnostics: \(list)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                    guard let self else { return }
+                    for line in self.host.statusLines() { self.log(1, "status: \(line)") }
+                    self.log(1, "status: display \(self.displayView.framesDrawn) frames drawn")
+                }
             }
             if defaults.bool(forKey: Keys.selfTest) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.runSelfTest() }

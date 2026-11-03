@@ -173,7 +173,7 @@ final class QemuEngine: VMEngine {
         builder.qmpFD = fds[1]
         builder.loadvmTag = config.restoreSnapshotTag
         #if targetEnvironment(simulator)
-        builder.adbHostPort = 5555    // `adb connect 127.0.0.1:5555` from the Mac
+        builder.adbHostPort = 5570    // `adb connect 127.0.0.1:5570` (run-macos.sh uses 5555, run_sim.sh 5590)
         #endif
         let argv = builder.build()
         log(1, "qemu " + argv.joined(separator: " "))

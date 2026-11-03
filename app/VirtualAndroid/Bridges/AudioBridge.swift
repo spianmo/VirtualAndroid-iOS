@@ -29,6 +29,9 @@ final class AudioBridge {
     private var micRate = 16000
     private var micWanted = false
     private var micDenied = false
+    private var syntheticMic: DispatchSourceTimer?
+    private var micSynthetic = false      // read under `lock`
+    private var syntheticPhase = 0.0
 
     private var observers: [NSObjectProtocol] = []
 
@@ -168,8 +171,11 @@ final class AudioBridge {
     func micStop() {
         lock.lock()
         micWanted = false
+        micSynthetic = false
         lock.unlock()
         queue.async {
+            self.syntheticMic?.cancel()
+            self.syntheticMic = nil
             if let e = self.micEngine {
                 e.inputNode.removeTap(onBus: 0)
                 e.stop()
@@ -190,6 +196,19 @@ final class AudioBridge {
     }
 
     private func requestMicPermissionThenStart() {
+        #if targetEnvironment(simulator)
+        // Simulator audio input needs the *Mac's* microphone permission for
+        // Simulator; without it CoreAudio's Initialize RPC hangs and aborts the
+        // process ("RPC timeout. Apparently deadlocked"). Use a synthetic mic
+        // unless explicitly enabled with -VASimulatorMic YES.
+        if !UserDefaults.standard.bool(forKey: "VASimulatorMic") {
+            lock.lock()
+            micSynthetic = true
+            lock.unlock()
+            startSyntheticMic()
+            return
+        }
+        #endif
         switch AVAudioApplication.shared.recordPermission {
         case .granted:
             startMicEngine()
@@ -250,12 +269,39 @@ final class AudioBridge {
         }
     }
 
+    /// 300 Hz tone at the guest's rate, for simulator testing.
+    private func startSyntheticMic() {
+        syntheticMic?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now(), repeating: .milliseconds(20))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let ring = self.micRing, rate = self.micRate, ch = self.micChannels, on = self.micWanted
+            self.lock.unlock()
+            guard on, let ring else { return }
+            let frames = rate / 50
+            var buf = [Int16](repeating: 0, count: frames * ch)
+            let step = 2 * Double.pi * 300 / Double(rate)
+            for f in 0..<frames {
+                let v = Int16(sin(self.syntheticPhase) * 3000)
+                for c in 0..<ch { buf[f * ch + c] = v }
+                self.syntheticPhase += step
+            }
+            self.syntheticPhase = self.syntheticPhase.truncatingRemainder(dividingBy: 2 * .pi)
+            _ = buf.withUnsafeBufferPointer { va_ring_write(ring, $0.baseAddress!, $0.count) }
+        }
+        t.resume()
+        syntheticMic = t
+    }
+
     // MARK: Session
 
     private func updateSession() {
         let session = AVAudioSession.sharedInstance()
         lock.lock()
-        let mic = micWanted && !micDenied
+        // .playAndRecord only while a real microphone is capturing.
+        let mic = micWanted && !micDenied && !micSynthetic
         let any = mic || speakerWanted
         lock.unlock()
         do {
@@ -285,7 +331,7 @@ final class AudioBridge {
         defer { lock.unlock() }
         var parts: [String] = []
         parts.append(speakerWanted ? "speaker \(speakerRate)Hz/\(speakerChannels)ch underruns=\(underruns)" : "speaker off")
-        parts.append(micWanted ? (micDenied ? "mic denied" : "mic \(micRate)Hz/\(micChannels)ch") : "mic off")
+        parts.append(micWanted ? (micDenied ? "mic denied" : "mic \(micRate)Hz/\(micChannels)ch\(syntheticMic != nil ? " (synthetic)" : "")") : "mic off")
         return "Audio: " + parts.joined(separator: ", ")
     }
 }

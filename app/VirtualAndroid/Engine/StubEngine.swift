@@ -282,11 +282,14 @@ final class StubEngine: VMEngine, StubDiagnostics {
         guard cb.speaker_start?(cb.opaque, 48000, 2) == true else { diag.tone = false; return }
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now(), repeating: .milliseconds(10))
-        var primed = false
+        var last: Double?
         t.setEventHandler { [weak self] in
             guard let self else { return }
-            self.writeTone(frames: primed ? 480 : 4800)    // prime 100 ms, then real time
-            primed = true
+            // Prime 100 ms, then produce exactly what elapsed (timers coalesce).
+            let now = CACurrentMediaTime()
+            let frames = last.map { Int(((now - $0) * 48000).rounded()) } ?? 4800
+            last = now
+            if frames > 0 { self.writeTone(frames: min(frames, 9600)) }
         }
         t.resume()
         audioTimer = t

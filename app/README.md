@@ -80,7 +80,7 @@ port of `tools/make_initrd.py`), with `androidboot.opengles.version` from
 for ANGLE Metal otherwise). QEMU argv (`VM/QemuArguments.swift`) mirrors
 `tools/run-macos.sh`: `-M ranchu` (override `-VAMachine virt`), cortex-a76,
 4 vCPU, 2 GB, disks vendor/encrypt/userdata/cache/system in that order
-(writable ones qcow2 so `savevm` works), virtio net (+adb 127.0.0.1:5555 on the
+(writable ones qcow2 so `savevm` works), virtio net (+adb 127.0.0.1:5570 on the
 simulator), rng, virtio-serial hvc0/hvc1 (logcat) into files, QMP.
 
 Snapshot placeholder (M4, `VM/SnapshotStore.swift`): "Quick boot" saves
@@ -123,7 +123,7 @@ gfx pipes before it can work with QEMU; the stub simulates it.
 | battery | UIDevice battery + thermalState | voltage nominal, temperature approximated; unknown (simulator) -> engine default |
 | clipboard | UIPasteboard | guest->iOS always; iOS->guest on "Paste" (or auto on activate if enabled) to avoid the paste prompt |
 | camera | AVCaptureSession 420f -> VTPixelTransferSession -> NV21 | back 90°, front 270°; synthetic camera when none (simulator) |
-| speaker / mic | AVAudioEngine + lock-free PCM16 rings (`Support/VARingBuffer.c`) | mic permission on mic_start; session .playback / .playAndRecord, mixWithOthers |
+| speaker / mic | AVAudioEngine + lock-free PCM16 rings (`Support/VARingBuffer.c`) | mic permission on mic_start; session .playback, .playAndRecord only while a real mic captures. **Simulator**: real input needs the Mac's microphone permission for Simulator, otherwise CoreAudio aborts the app ("Initialize: RPC timeout. Apparently deadlocked"), so the simulator uses a synthetic 300 Hz mic unless `-VASimulatorMic YES` |
 | vibrator | CoreHaptics continuous event | |
 
 Sensor timestamps are host CLOCK_UPTIME_RAW ns (CoreMotion's time base).
@@ -133,5 +133,10 @@ Sensor timestamps are host CLOCK_UPTIME_RAW ns (CoreMotion's time base).
 `-VAEngine stub|qemu|auto`, `-VAAutoBoot YES|NO`, `-VAMachine virt`,
 `-VAAutoStopAfter <s>` (QMP quit), `-VANavExpanded YES`,
 `-VAForceOrientation landscapeLeft|landscapeRight|portrait`,
-`-VASelfTest YES` (injects two touches + VOL+/BACK after boot).
+`-VASelfTest YES` (injects two touches + VOL+/BACK after boot),
+`-VAStubDiagnostics gnss,camera,mic,tone,sensors,vibrate,copy` (stub: simulate
+guest requests after boot and log every bridge's status 6 s later),
+`-VASimulatorMic YES`. Pre-grant simulator permissions with
+`xcrun simctl privacy <udid> grant location|camera|microphone|motion dev.virtualandroid.app`
+and set a position with `xcrun simctl location <udid> set <lat>,<lon>`.
 Guest logs: `vms/default/{serial,logcat,hvc0}.log` in the app container.
