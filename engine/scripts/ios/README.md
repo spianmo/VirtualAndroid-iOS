@@ -115,6 +115,23 @@ unix socket paths must stay under 104 bytes.
   (meson otherwise thinks iOS binaries run on the macOS build host).
 * `system/meson.build`: export `va_host_*` / `va_engine_*` from the darwin shared lib.
 
-## Boot results (simulator, headless, `-M virt`, `-accel tcg`)
+## Boot results (iOS 26.1 simulator, iPhone 17 Pro, M2 Max, headless)
 
-See the bottom of this file (updated by hand after runs).
+`run_sim.sh --fresh --until surfaceflinger`, `-smp 4 -m 2048 -cpu cortex-a76
+-accel tcg,thread=multi,tb-size=1024`, host load ~10 (other agents building).
+Times are host seconds since `simctl spawn` (guest kernel timestamp nearly equal).
+
+| milestone | TCG JIT (`-M virt`) | TCTI (`-M virt`) | TCG JIT (`-M ranchu`, load ~130) |
+|---|---|---|---|
+| `Run /init` | 3.1 s | 8.2 s | 5.4 s |
+| `init second stage started` | 7.2 s | 18.7 s | 11.9 s |
+| `starting service 'zygote'` | 68.7 s | 390.7 s | 106.5 s |
+| `starting service 'surfaceflinger'` | 69.7 s | 410.4 s | 109.6 s |
+
+TCTI is ~5.7x slower than the JIT to zygote. Beyond zygote the guest loops:
+hwcomposer/gralloc/surfaceflinger abort on `HostConnection: Failed to connect
+to host (QemuPipeStream)` and zygote restarts (no `opengles` pipe service /
+gfxstream yet; same state as the macOS HVF build). With `-M ranchu` the guest
+opens goldfish pipe services (`android_pipe_connect` trace: qemud
+boot-properties/sensors, opengles) which are not implemented yet (`found=0`).
+`quit` on the monitor makes `qemu_main_loop` return 0 and `qemu_cleanup` finish.
