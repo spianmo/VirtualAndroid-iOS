@@ -42,10 +42,40 @@ typedef struct VaGfxFrame {
 
 typedef void (*VaGfxPresentFn)(void *opaque, const VaGfxFrame *frame);
 
-/* Call once, before the guest boots (after android_pipe core is ready). */
-int va_gfx_init(const VaGfxConfig *config, VaGfxPresentFn present, void *opaque);
+struct AndroidPipeFuncs; /* engine/qemu/include/hw/android/android_pipe.h */
 
-/* Registers the pipe services with android_pipe_add_type(). */
+/*
+ * Engine entry points handed to libva_gfx, so the library never links
+ * against the QEMU binary/framework (QEMU loads libva_gfx with dlopen and
+ * resolves the va_gfx_* symbols with dlsym).
+ */
+typedef struct VaGfxEngineOps {
+    void (*pipe_add_type)(const char *service_name, void *service_opaque,
+                          const struct AndroidPipeFuncs *funcs);
+    void (*pipe_host_close)(void *hwpipe);
+    void (*pipe_host_signal_wake)(void *hwpipe, unsigned flags);
+    /* Big QEMU lock, required around pipe_host_* from renderer threads. */
+    void (*bql_lock)(void);
+    void (*bql_unlock)(void);
+    /* goldfish_sync device (guest sync fences for GL/Vulkan). */
+    uint64_t (*sync_create_timeline)(void);
+    int (*sync_create_fence)(uint64_t timeline, uint32_t point);
+    void (*sync_timeline_inc)(uint64_t timeline, uint32_t count);
+    void (*sync_destroy_timeline)(uint64_t timeline);
+    /*
+     * Guest asks the host to wait on a renderer sync object and then bump a
+     * timeline; the engine forwards such requests to this callback.
+     */
+    void (*sync_register_trigger_wait)(void (*trigger_wait)(uint64_t glsync,
+                                                            uint64_t thread,
+                                                            uint64_t timeline));
+} VaGfxEngineOps;
+
+/* Call once, before the guest boots (after the android_pipe core is ready). */
+int va_gfx_init(const VaGfxConfig *config, const VaGfxEngineOps *engine,
+                VaGfxPresentFn present, void *opaque);
+
+/* Registers the pipe services through engine->pipe_add_type(). */
 void va_gfx_register_pipe_services(void);
 
 /* The guest-visible renderer strings, for boot properties/logging. */
