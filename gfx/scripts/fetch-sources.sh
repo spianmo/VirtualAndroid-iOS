@@ -30,13 +30,24 @@ if [ ! -d "$GFX/src/webkit/Source/ThirdParty/ANGLE" ]; then
   git -C "$GFX/src/webkit" checkout -q FETCH_HEAD
 fi
 
-for p in gfxstream aemu; do
-  if [ -f "$GFX/patches/$p.patch" ]; then
-    if git -C "$GFX/src/$p" apply --check "$GFX/patches/$p.patch" 2>/dev/null; then
-      git -C "$GFX/src/$p" apply "$GFX/patches/$p.patch"
-      echo "applied $p.patch"
+# LZ4 (BSD-2) for the snapshot TextureSaver/Loader (only lib/lz4.{c,h}).
+if [ ! -f "$GFX/src/lz4/lib/lz4.c" ]; then
+  git init -q "$GFX/src/lz4"
+  git -C "$GFX/src/lz4" remote add origin https://github.com/lz4/lz4.git
+  git -C "$GFX/src/lz4" config core.sparseCheckout true
+  printf '/lib/lz4.c\n/lib/lz4.h\n/lib/LICENSE\n' > "$GFX/src/lz4/.git/info/sparse-checkout"
+  git -C "$GFX/src/lz4" fetch --depth 1 --filter=blob:none origin tag v1.10.0
+  git -C "$GFX/src/lz4" checkout -q v1.10.0
+fi
+
+for p in gfxstream:gfxstream aemu:aemu angle:webkit; do
+  name=${p%%:*}; dir=${p#*:}
+  if [ -f "$GFX/patches/$name.patch" ]; then
+    if git -C "$GFX/src/$dir" apply --check "$GFX/patches/$name.patch" 2>/dev/null; then
+      git -C "$GFX/src/$dir" apply "$GFX/patches/$name.patch"
+      echo "applied $name.patch"
     else
-      echo "$p.patch already applied or does not apply cleanly; skipping"
+      echo "$name.patch already applied or does not apply cleanly; skipping"
     fi
   fi
 done

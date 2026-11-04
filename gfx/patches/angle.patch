@@ -1,0 +1,52 @@
+diff --git a/Source/ThirdParty/ANGLE/src/libANGLE/renderer/metal/mtl_command_buffer.mm b/Source/ThirdParty/ANGLE/src/libANGLE/renderer/metal/mtl_command_buffer.mm
+index d182803b..337a701e 100644
+--- a/Source/ThirdParty/ANGLE/src/libANGLE/renderer/metal/mtl_command_buffer.mm
++++ b/Source/ThirdParty/ANGLE/src/libANGLE/renderer/metal/mtl_command_buffer.mm
+@@ -532,16 +532,42 @@ void CommandQueue::ensureResourceReadyForCPU(const ResourceRef &resource)
+ 
+ void CommandQueue::ensureResourceReadyForCPU(Resource *resource)
+ {
++    // VirtualAndroid: command buffers are listed in mMetalCmdBuffers when they
++    // are created, not when they are committed. Waiting on the front entries
++    // can therefore block forever on a buffer another context is still
++    // recording -- and with the share-group lock that context may be waiting
++    // for us (gfxstream renders from many contexts in one share group). Only
++    // wait for committed buffers up to the resource's serial; usage recorded
++    // by another context that has not been flushed is not waited for (GL
++    // requires a flush + sync for cross-context use anyway).
+     mLock.lock();
+     while (isResourceBeingUsedByGPU(resource) && !mMetalCmdBuffers.empty())
+     {
+-        CmdBufferQueueEntry metalBufferEntry = mMetalCmdBuffers.front();
+-        mMetalCmdBuffers.pop_front();
++        const uint64_t target = resource->getCommandBufferQueueSerial();
++        bool found = false;
++        CmdBufferQueueEntry waitEntry;
++        for (const CmdBufferQueueEntry &entry : mMetalCmdBuffers)
++        {
++            if (entry.serial > target)
++            {
++                break;
++            }
++            const MTLCommandBufferStatus status = entry.buffer.get().status;
++            if (status >= MTLCommandBufferStatusCommitted && status < MTLCommandBufferStatusCompleted)
++            {
++                waitEntry = entry;  // newest committed buffer that may use the resource
++                found     = true;
++            }
++        }
++        if (!found)
++        {
++            break;
++        }
+         mLock.unlock();
+ 
+-        ANGLE_MTL_LOG("Waiting for MTLCommandBuffer %llu:%p", metalBufferEntry.serial,
+-                      metalBufferEntry.buffer.get());
+-        [metalBufferEntry.buffer waitUntilCompleted];
++        ANGLE_MTL_LOG("Waiting for MTLCommandBuffer %llu:%p", waitEntry.serial,
++                      waitEntry.buffer.get());
++        [waitEntry.buffer waitUntilCompleted];
+ 
+         mLock.lock();
+     }

@@ -25,6 +25,7 @@
 
 #include "va_gfx_internal.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -105,6 +106,11 @@ struct State {
     std::atomic<int> snapState{0};
     std::atomic<bool> snapBusy{false};  // a save/load helper is still running
     std::atomic<int> livePipes{0};
+    // Pipe save/load calls still expected for the current snapshot. Render
+    // threads resume only when it reaches 0 (all pipe sections done) or on
+    // real guest pipe activity -- never just because the BQL was released:
+    // QEMU's migration code releases it between sections.
+    std::atomic<int> snapPipesPending{0};
     std::mutex snapLock;
 };
 
@@ -253,10 +259,7 @@ void performOp(const DeferredOp& op) {
     if (g.shutdown.load()) return;
     switch (op.kind) {
         case DeferredOp::kResume:
-            // Runs once the BQL is free again, i.e. after the engine finished
-            // saving/loading every graphics pipe.
-            resumeAfterSnapshot(2000, "after snapshot");
-            break;
+            break;  // unused
         case DeferredOp::kWake:
             if (!op.pipe->hostClosed && g.engine.pipe_host_signal_wake) {
                 g.engine.pipe_host_signal_wake(op.pipe->hwpipe, op.flags);
@@ -273,6 +276,10 @@ void performOp(const DeferredOp& op) {
 
 void hwCloseFromHost(void* hw) {
     auto* p = static_cast<VaGfxPipe*>(hw);
+    if (getenv("VA_GFX_DEBUG_PIPES")) {
+        static std::atomic<int> logged{0};
+        if (logged++ < 20) VLOG("debug: host closes '%s' pipe %d", p->service.c_str(), p->id);
+    }
     DeferredOp op{DeferredOp::kClose, p, 0};
     if (t_inEngineCallback) {
         performOp(op);
@@ -361,7 +368,17 @@ extern "C" int vagfx_pipe_recv(VaGfxPipe* p, void* buffers, int n) {
     EngineCallbackScope scope;
     if (g.processExiting.load()) return PIPE_ERROR_IO;
     if (g.snapState.load()) resumeAfterSnapshot(0, "pipe recv");
-    return android_pipe_guest_recv(p->aemuPipe, static_cast<AndroidPipeBuffer*>(buffers), n);
+    const int r =
+        android_pipe_guest_recv(p->aemuPipe, static_cast<AndroidPipeBuffer*>(buffers), n);
+    if (r == PIPE_ERROR_IO && getenv("VA_GFX_DEBUG_PIPES")) {
+        static std::atomic<int> logged{0};
+        if (logged++ < 20) {
+            VLOG("debug: recv EIO on '%s' pipe %d (poll 0x%x, snapState %d, hostClosed %d)",
+                 p->service.c_str(), p->id, android_pipe_guest_poll(p->aemuPipe),
+                 g.snapState.load(), p->hostClosed);
+        }
+    }
+    return r;
 }
 
 extern "C" unsigned vagfx_pipe_poll(VaGfxPipe* p) {
@@ -397,7 +414,7 @@ extern "C" void vagfx_pipe_wake_on(VaGfxPipe* p, int flags) {
 namespace {
 
 constexpr uint32_t kSectionMagic = 0x56414758;  // 'VAGX'
-constexpr uint32_t kSectionVersion = 1;
+constexpr uint32_t kSectionVersion = 2;  // v2: + graphics pipe count
 constexpr uint32_t kPipeMagic = 0x56414750;     // 'VAGP'
 constexpr uint32_t kPipeVersion = 1;
 constexpr char kTextureFile[] = "gfx-textures.bin";
@@ -410,6 +427,19 @@ long snapshotTimeoutMs() {
 }
 
 ::Stream* asCStream(android::base::Stream* s) { return reinterpret_cast<::Stream*>(s); }
+
+// The last pipe section of a save/load was processed: resume on a helper
+// thread (the caller holds the BQL; waiting for render threads there is not ok).
+void onSnapshotPipeDone() {
+    if (g.snapPipesPending.fetch_sub(1) == 1) {
+        std::thread([] {
+            pthread_setname_np("va-gfx-resume");
+            for (int i = 0; i < 100 && g.snapState.load(); i++) {
+                resumeAfterSnapshot(100, "all pipe sections done");
+            }
+        }).detach();
+    }
+}
 
 void resumeAfterSnapshot(int waitMs, const char* who) {
     if (!g.snapState.load() || g.snapBusy.load()) return;
@@ -489,11 +519,23 @@ extern "C" void vagfx_pipe_save(VaGfxPipe* p, struct AndroidPipeStream* s) {
     put32(s, len);
     if (len) g.engine.pipe_stream_put_buffer(s, buf.data(), len);
     if (!restorable) VLOG("snapshot: pipe '%s' saved as not restorable", p->service.c_str());
+    if (g.snapState.load() == 1) onSnapshotPipeDone();
 }
+
+static VaGfxPipe* vagfxPipeLoadImpl(void* hwpipe, const char* service, const char* args,
+                                    struct AndroidPipeStream* s);
 
 extern "C" VaGfxPipe* vagfx_pipe_load(void* hwpipe, const char* service, const char* args,
                                       struct AndroidPipeStream* s) {
     EngineCallbackScope scope;
+    const bool counting = g.snapState.load() == 2;
+    VaGfxPipe* p = vagfxPipeLoadImpl(hwpipe, service, args, s);
+    if (counting) onSnapshotPipeDone();
+    return p;
+}
+
+static VaGfxPipe* vagfxPipeLoadImpl(void* hwpipe, const char* service, const char* args,
+                                    struct AndroidPipeStream* s) {
     uint32_t magic = 0, version = 0, restorable = 0, pending = 0, len = 0;
     if (!get32(s, &magic) || !get32(s, &version) || !get32(s, &restorable) ||
         !get32(s, &pending) || !get32(s, &len) || magic != kPipeMagic ||
@@ -504,6 +546,8 @@ extern "C" VaGfxPipe* vagfx_pipe_load(void* hwpipe, const char* service, const c
     android::base::MemStream::Buffer data(len);
     if (len && g.engine.pipe_stream_get_buffer(s, data.data(), len) != len) return nullptr;
     if (!restorable || g.snapState.load() != 2 || g.shutdown.load() || !g.renderer) {
+        VLOG("snapshot: pipe '%s' not restored (%s)", service,
+             !restorable ? "saved as not restorable" : "renderer not loading a snapshot");
         return nullptr;  // engine closes it; the guest reconnects
     }
     android::base::MemStream ms(std::move(data));
@@ -595,10 +639,16 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_snapshot_save(
     }
     const auto& buf = job->state.buffer();
     const uint64_t len = (uint64_t)job->state.writtenSize();
+    const uint32_t pipes = (uint32_t)std::max(0, g.livePipes.load());
     const bool written = ioWrite32(io, kSectionMagic) && ioWrite32(io, kSectionVersion) &&
-                         ioWrite(io, &len, sizeof(len)) && ioWrite(io, buf.data(), len);
+                         ioWrite32(io, pipes) && ioWrite(io, &len, sizeof(len)) &&
+                         ioWrite(io, buf.data(), len);
+    g.snapPipesPending.store((int)pipes);
     g.snapState.store(1);
-    waker().push({DeferredOp::kResume, nullptr, 0});
+    if (pipes == 0) {
+        g.snapPipesPending.store(1);
+        onSnapshotPipeDone();
+    }
     VLOG("snapshot save: %s in %.1f ms (cleanup %.1f, park %zu render threads %.1f, renderer "
          "%.1f, sync drain %.1f); state %llu bytes, textures %llu bytes in %s",
          written ? "ok" : "io write FAILED", msSince(t0), job->msCleanup,
@@ -617,10 +667,11 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_snapshot_load(
         return -1;
     }
     const uint64_t t0 = nowUs();
-    uint32_t magic = 0, version = 0;
+    uint32_t magic = 0, version = 0, pipes = 0;
     uint64_t len = 0;
-    if (!ioRead32(io, &magic) || !ioRead32(io, &version) || !ioRead(io, &len, sizeof(len)) ||
-        magic != kSectionMagic || version != kSectionVersion || len > (1ull << 31)) {
+    if (!ioRead32(io, &magic) || !ioRead32(io, &version) || !ioRead32(io, &pipes) ||
+        !ioRead(io, &len, sizeof(len)) || magic != kSectionMagic ||
+        version != kSectionVersion || len > (1ull << 31)) {
         VLOG("snapshot load: bad section header");
         return -1;
     }
@@ -668,11 +719,15 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_snapshot_load(
         VLOG("snapshot load: renderer load failed");
         return -1;
     }
+    g.snapPipesPending.store((int)pipes);
     g.snapState.store(2);
-    waker().push({DeferredOp::kResume, nullptr, 0});
+    if (pipes == 0) {
+        g.snapPipesPending.store(1);
+        onSnapshotPipeDone();
+    }
     VLOG("snapshot load: ok in %.1f ms (read %.1f, renderer %.1f, re-present %.1f); state %llu "
-         "bytes",
-         msSince(t0), msRead, job->msRenderer, job->msRepost, (unsigned long long)len);
+         "bytes, %u graphics pipes to restore",
+         msSince(t0), msRead, job->msRenderer, job->msRepost, (unsigned long long)len, pipes);
     return 0;
 }
 

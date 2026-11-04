@@ -213,6 +213,71 @@ androidboot.qemu.vsync=<refresh_hz>
 * Snapshot save/load of these pipes is not implemented yet (`save`/`load` are
   NULL, so the engine closes them on load; the guest reconnects).
 
+## Snapshot (M4, docs/SNAPSHOT.md)
+
+`va_gfx_snapshot_save/load` plus the graphics pipes' `AndroidPipeFuncs.save/load`.
+
+**Contract change (additive):** `VaGfxEngineOps` gained `pipe_stream_put_buffer` /
+`pipe_stream_get_buffer`; set them to `android_pipe_stream_put_buffer` /
+`android_pipe_stream_get_buffer` (libva_gfx cannot link those QEMU symbols).
+If they are NULL the graphics pipes register `save/load = NULL` (closed on
+load, as before). `integration/ranchu_gfx.c` fills them.
+
+What is saved:
+* `va-gfx` section (via `VaGfxSnapshotIo`, length-framed, `'VAGX'` v1): display
+  size, aemu pipe-service state (GLProcessPipe id counter) and the gfxstream
+  FrameBuffer (`RendererImpl::save`: contexts, surfaces, ColorBuffers, EGL
+  images, fences). Texture contents go to `<aux_dir>/gfx-textures.bin` (aemu
+  TextureSaver, LZ4).
+* each graphics pipe (`'VAGP'` v1): aemu `AndroidPipe::saveToStream` (opengles:
+  unread reply bytes, RenderChannel queues and its RenderThread's state;
+  GLProcessPipe: process id; refcount: handle) plus wake flags that were still
+  queued for the device.
+
+How it runs (VM stopped, BQL held, never blocking on renderer threads):
+* save: on a helper thread with a deadline (`VA_GFX_SNAPSHOT_TIMEOUT_MS`, default
+  10 s): wait for an earlier load's background texture loading, drain process
+  cleanup, park every render thread at its snapshot point, save the
+  FrameBuffer, drain SyncThread (pending trigger-wait results reach goldfish_sync
+  before that device is saved). Render threads stay parked while the engine
+  saves the pipes; they resume once the BQL is free again (or on the next pipe
+  callback). A timeout returns -1 and the guest keeps running.
+* load (fresh renderer): restore the FrameBuffer, re-present the last frame
+  (`FrameBuffer::repost` -> VaGfxPresentFn), then each pipe load recreates its
+  channel + render thread, which restores its state and parks until resume.
+
+The engine must also restore the pipes *after* `va_gfx_snapshot_load` and may
+release the BQL between sections: render threads resume only when every pipe
+counted at save time has been loaded (or on guest pipe activity), never on a
+"BQL is free" heuristic. `VA_GFX_DEBUG_PIPES=1` logs pipe EIO/host-close causes.
+
+Measured (harness, `tests/run-snapshot-tests.sh`, 1080x2340, 10 ColorBuffers,
+macOS M2 Max): save ~120-160 ms, `gfx-textures.bin` 10.8 MB (101 MB raw),
+`state.bin` 6 KB, load to first re-presented frame ~225-290 ms; the
+re-presented frame and a re-done composition are pixel-identical to process
+A's; the restored GL context, buffers, GLProcessPipe ids and refcount pipe keep
+working; a restored process can be suspended again.
+
+Real guest (macOS HVF, `tools/run-macos.sh --snapshot` + `tools/snapshot.py`, engine
+0e17cd59b, host load average 30-60 from other builds): 4 suspend/restore cycles
+from the home screen, 72-76 graphics pipes and 17-35 render threads each time:
+va_gfx save 263-558 ms (one outlier 1.8 s), `snapshot/gfx` 5-13 MB, va_gfx load
+563-853 ms (outlier 1.26 s), first frame 1.2-3.0 s after QEMU launch (0.64 s on
+an idle host), the re-presented frame pixel-identical to the last pre-suspend
+frame; then 2 min of `am start` Settings/Contacts + swipes: 0 watchdog / EGL /
+pipe errors in 3 cycles, one app input-ANR (Settings, "no focused window") in
+the 4th under load.
+
+Needed for ANGLE (Metal) with many contexts (patches/angle.patch): ANGLE lists
+Metal command buffers when created, and `ensureResourceReadyForCPU` waited on
+the oldest ones -- possibly another context's uncommitted buffer, whose owner
+waits for the share-group lock: a deadlock (seen restoring the real guest:
+texture upload stuck in `waitUntilCompleted` while the background texture
+loader waited for the lock). Patched to wait only for committed buffers.
+
+Not covered yet: Vulkan state (gfxstream VulkanSnapshots is off), the
+address-space-graphics transport (not used by this guest).
+
 ## Implementation notes
 
 * ANGLE must be built with `ANGLE_ENABLE_SHARE_CONTEXT_LOCK=1` and
