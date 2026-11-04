@@ -39,6 +39,12 @@ for f in va_gfx va_gfx_present va_gfx_present_gl; do
   "$CXX" "${COMMON[@]}" -std=gnu++17 "${INC[@]}" "${DEFS[@]}" -Wno-extern-c-compat \
     -c "$GFX/libva_gfx/$f.cpp" -o "$OBJ/$f.o"
 done
+# LZ4 (BSD-2) + aemu's (De)CompressingStream: used by the snapshot TextureSaver/Loader.
+"$CC" "${COMMON[@]}" -std=c11 -O3 -c "$GFX/src/lz4/lib/lz4.c" -o "$OBJ/lz4.o"
+for f in CompressingStream DecompressingStream; do
+  "$CXX" "${COMMON[@]}" -std=gnu++17 "${INC[@]}" -I"$GFX/src/lz4/lib" \
+    -c "$GFX/src/aemu/base/$f.cpp" -o "$OBJ/aemu_$f.o"
+done
 # aemu's gfxstream build-config leaves VmLock.cpp out of aemu-host-common.
 "$CXX" "${COMMON[@]}" -std=gnu++17 "${INC[@]}" -I"$GFX/src/aemu/host-common/include/host-common" \
   -c "$GFX/src/aemu/host-common/VmLock.cpp" -o "$OBJ/aemu_VmLock.o"
@@ -61,6 +67,7 @@ fi
   -install_name "$INSTALL_NAME" \
   -Wl,-exported_symbols_list,"$GFX/libva_gfx/exports.txt" -Wl,-dead_strip \
   "$OBJ/va_gfx_pipe_shim.o" "$OBJ/va_gfx.o" "$OBJ/va_gfx_present.o" "$OBJ/va_gfx_present_gl.o" "$OBJ/aemu_VmLock.o" \
+  "$OBJ/lz4.o" "$OBJ/aemu_CompressingStream.o" "$OBJ/aemu_DecompressingStream.o" \
   "${LIBS[@]}" "${FW[@]}" -lc++
 echo "built $OBJ/libva_gfx.dylib"
 nm -gU "$OBJ/libva_gfx.dylib" | grep va_gfx

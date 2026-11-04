@@ -35,6 +35,8 @@ static void (*p_va_gfx_register_pipe_services)(void);
 static const char *(*p_va_gfx_renderer_string)(void);
 static int (*p_va_gfx_get_gles_version)(int *, int *);
 static void (*p_va_gfx_teardown)(void);
+static int (*p_va_gfx_snapshot_save)(const VaGfxSnapshotIo *, const char *);
+static int (*p_va_gfx_snapshot_load)(const VaGfxSnapshotIo *, const char *);
 
 static int failures = 0;
 static int s_vulkan_advertised = 0;
@@ -109,6 +111,35 @@ typedef struct {
     unsigned wakes;
     int closed;
 } FakePipe;
+
+/* The fake engine's AndroidPipeStream (android_pipe.h keeps it opaque). */
+struct AndroidPipeStream {
+    uint8_t *data;
+    size_t len, cap, pos;
+    int error;
+};
+
+static void eng_stream_put(struct AndroidPipeStream *s, const void *buf, size_t len)
+{
+    if (s->len + len > s->cap) {
+        s->cap = (s->len + len) * 2 + 64;
+        s->data = realloc(s->data, s->cap);
+    }
+    memcpy(s->data + s->len, buf, len);
+    s->len += len;
+}
+
+static size_t eng_stream_get(struct AndroidPipeStream *s, void *buf, size_t len)
+{
+    size_t avail = s->len - s->pos;
+    if (len > avail) {
+        s->error = 1;
+        len = avail;
+    }
+    memcpy(buf, s->data + s->pos, len);
+    s->pos += len;
+    return len;
+}
 
 static FakePipe *s_pipes[8]; /* open guest pipes, for the atexit exit notifier */
 static int s_npipes = 0;
@@ -322,6 +353,10 @@ enum {
     OP_glEnable = 2090,
     OP_glScissor = 2144,
     OP_glViewport = 2189,
+    OP_glBindTexture = 2054,
+    OP_glGenerateMipmap = 2098,
+    OP_glGenTextures = 2101,
+    OP_glTexImage2D = 2153,
 };
 
 static uint32_t rc0(FakePipe *p, uint32_t op)
@@ -535,6 +570,417 @@ static void harness_qemu_exit_notifier(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Snapshot (HARNESS_SNAPSHOT=save|load, HARNESS_SNAPDIR=<dir>)          */
+/* ------------------------------------------------------------------ */
+
+#define SNAP_EXTRA_CBS 7 /* + cb1, cb2, compose target = 10 color buffers */
+
+typedef struct {
+    uint32_t magic, w, h;
+    uint64_t puid;
+    uint32_t cb1, cb2, target, ctx, surf, config;
+    uint32_t extra[SNAP_EXTRA_CBS];
+} GuestState;
+
+static int io_file_write(void *opaque, const void *buf, size_t len)
+{
+    return fwrite(buf, 1, len, (FILE *)opaque) == len ? 0 : -1;
+}
+
+static int io_file_read(void *opaque, void *buf, size_t len)
+{
+    return fread(buf, 1, len, (FILE *)opaque) == len ? 0 : -1;
+}
+
+static double now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
+
+/* Raw BGRA dump of a frame (rows tightly packed). */
+static void dump_raw(IOSurfaceRef s, const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    IOSurfaceLock(s, kIOSurfaceLockReadOnly, NULL);
+    const uint8_t *base = IOSurfaceGetBaseAddress(s);
+    for (size_t y = 0; y < IOSurfaceGetHeight(s); y++) {
+        fwrite(base + y * IOSurfaceGetBytesPerRow(s), 4, IOSurfaceGetWidth(s), f);
+    }
+    IOSurfaceUnlock(s, kIOSurfaceLockReadOnly, NULL);
+    fclose(f);
+}
+
+/* Number of pixels that differ from a raw dump (-1: missing / wrong size). */
+static long diff_raw(IOSurfaceRef s, const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    const size_t w = IOSurfaceGetWidth(s), h = IOSurfaceGetHeight(s);
+    uint8_t *row = malloc(w * 4);
+    long diff = 0;
+    IOSurfaceLock(s, kIOSurfaceLockReadOnly, NULL);
+    const uint8_t *base = IOSurfaceGetBaseAddress(s);
+    for (size_t y = 0; y < h; y++) {
+        if (fread(row, 4, w, f) != w) {
+            diff = -1;
+            break;
+        }
+        const uint8_t *a = base + y * IOSurfaceGetBytesPerRow(s);
+        for (size_t x = 0; x < w; x++) {
+            if (memcmp(a + x * 4, row + x * 4, 4)) diff++;
+        }
+    }
+    IOSurfaceUnlock(s, kIOSurfaceLockReadOnly, NULL);
+    free(row);
+    fclose(f);
+    return diff;
+}
+
+static long long dir_bytes(const char *dir, const char *name)
+{
+    char p[1024];
+    snprintf(p, sizeof(p), "%s/%s", dir, name);
+    FILE *f = fopen(p, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long long n = ftell(f);
+    fclose(f);
+    return n;
+}
+
+/* Fill color buffer |cb| with pattern |k| (gradients and flat UI-like fills). */
+static void upload_pattern(FakePipe *gl, uint32_t cb, int k)
+{
+    uint8_t *px = malloc((size_t)W * H * 4);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            uint8_t *p = px + ((size_t)y * W + x) * 4;
+            if (k % 2) { /* flat fill with a band, compresses like UI */
+                const int band = (y / 64) % 2;
+                p[0] = (uint8_t)(40 * k);
+                p[1] = band ? 200 : 30;
+                p[2] = (uint8_t)(255 - 30 * k);
+            } else { /* gradient */
+                p[0] = (uint8_t)((x + 17 * k) & 255);
+                p[1] = (uint8_t)((y + 31 * k) & 255);
+                p[2] = (uint8_t)((x ^ y) & 255);
+            }
+            p[3] = 255;
+        }
+    Packet pk = pk_begin(OP_rcUpdateColorBuffer);
+    uint32_t args[] = { cb, 0, 0, (uint32_t)W, (uint32_t)H, 0x1908, 0x1401 };
+    for (int i = 0; i < 7; i++) pk_u32(&pk, args[i]);
+    pk_u32(&pk, (uint32_t)W * H * 4);
+    pk_bytes(&pk, px, (size_t)W * H * 4);
+    free(px);
+    pk_send(gl, &pk);
+    (void)read_u32(gl);
+}
+
+static int compose2(FakePipe *gl, uint32_t target, uint32_t base_cb, uint32_t over_cb)
+{
+    ComposeDeviceV2 dev;
+    memset(&dev, 0, sizeof(dev));
+    dev.version = 2;
+    dev.targetHandle = target;
+    dev.numLayers = 2;
+    dev.layer[0] = (ComposeLayer){ .cbHandle = base_cb, .composeMode = 2,
+                                   .displayFrame = { 0, 0, W, H },
+                                   .crop = { 0, 0, W, H }, .blendMode = 1, .alpha = 1.0f };
+    if (over_cb) {
+        dev.layer[1] = (ComposeLayer){ .cbHandle = over_cb, .composeMode = 2,
+                                       .displayFrame = { W / 8, H / 8, W / 2, H / 2 },
+                                       .crop = { 0, 0, W, H }, .blendMode = 1, .alpha = 1.0f };
+    } else {
+        dev.layer[1] = (ComposeLayer){ .cbHandle = 0, .composeMode = 3,
+                                       .displayFrame = { W / 4, H / 4, W * 3 / 4, H * 3 / 4 },
+                                       .crop = { 0, 0, 0, 0 }, .blendMode = 1, .alpha = 1.0f,
+                                       .color = { 255, 255, 0, 255 } };
+    }
+    Packet pk = pk_begin(OP_rcCompose);
+    pk_u32(&pk, sizeof(dev));
+    pk_u32(&pk, sizeof(dev));
+    pk_bytes(&pk, &dev, sizeof(dev));
+    pk_send(gl, &pk);
+    return (int)read_u32(gl);
+}
+
+/* Waits for the first frame presented after |before| frames had been seen.
+ * Called with the BQL held; returns with it held. */
+static IOSurfaceRef frame_after(int before)
+{
+    const int want = before + 1;
+    bql_unlock();
+    IOSurfaceRef f = wait_frame(want);
+    bql_lock();
+    return f;
+}
+
+static FakePipe *find_pipe(const char *name)
+{
+    for (int i = 0; i < s_npipes; i++) {
+        if (s_pipes[i] && !strcmp(s_pipes[i]->svc->name, name)) return s_pipes[i];
+    }
+    return NULL;
+}
+
+/* Guest GLES textures that are not RGBA8 level 0: what the real guest has
+ * (A8 glyph caches, mipmapped images). Their save path differs (board's
+ * crash: glGetTexImage bound to the system desktop libGL). */
+static void make_guest_textures(FakePipe *gl)
+{
+    Packet pk = pk_begin(OP_glGenTextures);
+    pk_u32(&pk, 2);
+    pk_u32(&pk, 8); /* out buffer: 2 GLuint */
+    pk_send(gl, &pk);
+    uint32_t tex[2] = { 0, 0 };
+    guest_read(gl, tex, 8);
+    const struct { uint32_t fmt, bpp; } kinds[2] = { { 0x1906 /* GL_ALPHA */, 1 },
+                                                     { 0x1908 /* GL_RGBA */, 4 } };
+    for (int i = 0; i < 2; i++) {
+        rcN(gl, OP_glBindTexture, 0, 2, 0x0DE1, tex[i]);
+        const uint32_t n = 64 * 64 * kinds[i].bpp;
+        uint8_t *px = malloc(n);
+        for (uint32_t k = 0; k < n; k++) px[k] = (uint8_t)(k * 7 + i);
+        pk = pk_begin(OP_glTexImage2D);
+        uint32_t a[] = { 0x0DE1, 0, kinds[i].fmt, 64, 64, 0, kinds[i].fmt, 0x1401 };
+        for (int j = 0; j < 8; j++) pk_u32(&pk, a[j]);
+        pk_u32(&pk, n);
+        pk_bytes(&pk, px, n);
+        pk_send(gl, &pk);
+        free(px);
+        if (i == 1) rcN(gl, OP_glGenerateMipmap, 0, 1, 0x0DE1);
+    }
+    rcN(gl, OP_glBindTexture, 0, 2, 0x0DE1, 0);
+    (void)rc0(gl, OP_rcGetRendererVersion);
+    printf("snapshot: guest textures %u (GL_ALPHA 64x64) and %u (RGBA 64x64, mipmapped)\n", tex[0],
+           tex[1]);
+}
+
+/* Process A: everything rendered so far is live; save and exit like QEMU. */
+static void snapshot_save_and_exit(const char *dir, FakePipe *gl, GuestState *gs)
+{
+    /* ~10 color buffers with content, then a distinctive last frame */
+    for (int i = 0; i < SNAP_EXTRA_CBS; i++) {
+        gs->extra[i] = rcN(gl, OP_rcCreateColorBuffer, 1, 3, W, H, 0x1908);
+        upload_pattern(gl, gs->extra[i], i);
+    }
+    make_guest_textures(gl);
+    int before = s_frames;
+    const int crc = compose2(gl, gs->target, gs->cb2, gs->extra[1]);
+    CHECK(crc >= 0, "final composition rc=%d", crc);
+    IOSurfaceRef last = frame_after(before);
+    CHECK(last, "no last frame before save");
+    char p[1024];
+    if (last) {
+        snprintf(p, sizeof(p), "%s/before_last.raw", dir);
+        dump_raw(last, p);
+        snprintf(p, sizeof(p), "%s/before_last.png", dir);
+        write_png(last, p);
+        CFRelease(last);
+    }
+
+    /* engine: stop VM -> va-gfx section -> each pipe's save (BQL held) */
+    snprintf(p, sizeof(p), "%s/state.bin", dir);
+    FILE *f = fopen(p, "wb");
+    VaGfxSnapshotIo io = { f, io_file_write, io_file_read };
+    const double t0 = now_ms();
+    const int rc = p_va_gfx_snapshot_save(&io, dir);
+    const double t1 = now_ms();
+    CHECK(rc == 0, "va_gfx_snapshot_save = %d", rc);
+    uint32_t n = 0;
+    for (int i = 0; i < s_npipes; i++) n += s_pipes[i] != NULL;
+    fwrite(&n, 4, 1, f);
+    for (int i = 0; i < s_npipes; i++) {
+        FakePipe *fp = s_pipes[i];
+        if (!fp) continue;
+        struct AndroidPipeStream st = { 0 };
+        fp->svc->funcs->save(fp->state, &st);
+        const uint32_t nl = (uint32_t)strlen(fp->svc->name), bl = (uint32_t)st.len;
+        fwrite(&nl, 4, 1, f);
+        fwrite(fp->svc->name, 1, nl, f);
+        fwrite(&bl, 4, 1, f);
+        fwrite(st.data, 1, bl, f);
+        printf("snapshot: pipe %-13s %u bytes\n", fp->svc->name, bl);
+        free(st.data);
+    }
+    const double t2 = now_ms();
+    gs->magic = 0x48534e50;
+    fwrite(gs, sizeof(*gs), 1, f);
+    fclose(f);
+    printf("snapshot save (%dx%d, %d color buffers): va_gfx_snapshot_save %.1f ms + %u pipe "
+           "saves %.1f ms = %.1f ms; state.bin %lld bytes, aux gfx-textures.bin %lld bytes\n",
+           W, H, SNAP_EXTRA_CBS + 3, t1 - t0, n, t2 - t1, t2 - t0, dir_bytes(dir, "state.bin"),
+           dir_bytes(dir, "gfx-textures.bin"));
+    printf("%s (%d failures)\n", failures ? "HARNESS FAILED" : "HARNESS PASSED", failures);
+    exit(failures ? 1 : 0); /* BQL held, renderer threads parked: like QEMU after cpr-reboot */
+}
+
+/* Process B: fresh renderer, restore, then keep driving the same guest stream. */
+static int snapshot_load_and_continue(const char *dir)
+{
+    char p[1024];
+    snprintf(p, sizeof(p), "%s/state.bin", dir);
+    FILE *f = fopen(p, "rb");
+    CHECK(f, "open %s", p);
+    if (!f) return 1;
+    VaGfxSnapshotIo io = { f, io_file_write, io_file_read };
+    const int frames0 = s_frames;
+    const double t0 = now_ms();
+    const int rc = p_va_gfx_snapshot_load(&io, dir);
+    const double t1 = now_ms();
+    CHECK(rc == 0, "va_gfx_snapshot_load = %d", rc);
+    uint32_t n = 0;
+    fread(&n, 4, 1, f);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t nl = 0, bl = 0;
+        char name[64] = { 0 };
+        fread(&nl, 4, 1, f);
+        fread(name, 1, nl < 63 ? nl : 63, f);
+        fread(&bl, 4, 1, f);
+        struct AndroidPipeStream st = { malloc(bl ? bl : 1), bl, bl, 0, 0 };
+        fread(st.data, 1, bl, f);
+        const Service *svc = NULL;
+        for (int k = 0; k < s_nservices; k++) {
+            if (!strcmp(s_services[k].name, name)) svc = &s_services[k];
+        }
+        CHECK(svc && svc->funcs->load, "service %s not restorable", name);
+        if (svc && svc->funcs->load) {
+            FakePipe *fp = calloc(1, sizeof(*fp));
+            fp->svc = svc;
+            fp->state = svc->funcs->load(fp, svc->opaque, NULL, &st);
+            CHECK(fp->state && !st.error, "pipe %s load failed", name);
+            if (fp->state && s_npipes < 8) s_pipes[s_npipes++] = fp;
+        }
+        free(st.data);
+    }
+    const double t2 = now_ms();
+    GuestState gs;
+    CHECK(fread(&gs, sizeof(gs), 1, f) == 1 && gs.magic == 0x48534e50, "guest state");
+    fclose(f);
+    CHECK(gs.w == (uint32_t)W && gs.h == (uint32_t)H, "display size");
+
+    /* the last frame is presented again by the load itself */
+    IOSurfaceRef re = NULL;
+    bql_unlock();
+    re = wait_frame(frames0 + 1);
+    const double t3 = now_ms();
+    bql_lock();
+    CHECK(re, "no frame re-presented after load");
+    if (re) {
+        snprintf(p, sizeof(p), "%s/before_last.raw", dir);
+        const long d = diff_raw(re, p);
+        printf("re-presented frame after load: %ld pixels differ from the last frame before save\n",
+               d);
+        CHECK(d == 0, "re-presented frame differs (%ld)", d);
+        snprintf(p, sizeof(p), "%s/after_load.png", dir);
+        write_png(re, p);
+        CFRelease(re);
+    }
+    printf("snapshot load: va_gfx_snapshot_load %.1f ms + %u pipe loads %.1f ms = %.1f ms; "
+           "first frame %.1f ms after start\n",
+           t1 - t0, n, t2 - t1, t2 - t0, t3 - t0);
+
+    FakePipe *gl = find_pipe("opengles");
+    FakePipe *ref = find_pipe("refcount");
+    CHECK(gl && ref && find_pipe("GLProcessPipe"), "restored pipes");
+    if (!gl) return 1;
+
+    /* the restored connection keeps working */
+    const uint32_t ver = rc0(gl, OP_rcGetRendererVersion);
+    CHECK(ver == 1, "rcGetRendererVersion on the restored pipe = %u", ver);
+    const uint32_t fbw = rcN(gl, OP_rcGetFBParam, 1, 1, 1);
+    CHECK(fbw == (uint32_t)W, "rcGetFBParam after restore = %u", fbw);
+    FakePipe *proc2 = guest_open("GLProcessPipe");
+    uint64_t puid2 = 0;
+    if (proc2) {
+        int32_t confirm = 100;
+        guest_write(proc2, &confirm, 4);
+        guest_read(proc2, &puid2, 8);
+    }
+    printf("restored puid %llu, a new process gets puid %llu\n", (unsigned long long)gs.puid,
+           (unsigned long long)puid2);
+    CHECK(puid2 > gs.puid, "process ids must continue after restore");
+
+    /* restored color buffers: redo the frame-3 composition -> identical pixels */
+    int before = s_frames;
+    CHECK(compose2(gl, gs.target, gs.cb1, 0) >= 0, "rcCompose after restore");
+    IOSurfaceRef c3 = frame_after(before);
+    if (c3) {
+        snprintf(p, sizeof(p), "%s/before_compose.raw", dir);
+        const long d = diff_raw(c3, p);
+        printf("frame-3 composition redone after restore: %ld pixels differ\n", d);
+        CHECK(d == 0, "composition after restore differs (%ld)", d);
+        CFRelease(c3);
+    }
+    /* restored GL context/surface are still current on the restored render thread */
+    rcN(gl, OP_glViewport, 0, 4, 0, 0, W, H);
+    gl_clear_color(gl, 0.2f, 0.7f, 0.3f, 1.0f);
+    rcN(gl, OP_glClear, 0, 1, 0x4000);
+    const int fl = (int)rcN(gl, OP_rcFlushWindowColorBuffer, 1, 1, gs.surf);
+    CHECK(fl == 0, "rcFlushWindowColorBuffer after restore = %d", fl);
+    before = s_frames;
+    rcN(gl, OP_rcFBPost, 0, 1, gs.cb2);
+    (void)rc0(gl, OP_rcGetRendererVersion); /* round trip: the post has been processed */
+    IOSurfaceRef g2 = frame_after(before);
+    if (g2) {
+        uint8_t px[4];
+        pixel_at(g2, W / 2, H / 2, px);
+        printf("GLES draw on the restored context: rgba(%d,%d,%d)\n", px[0], px[1], px[2]);
+        CHECK(near(px, 51, 179, 77), "GLES clear after restore");
+        CFRelease(g2);
+    }
+    /* restored extra buffer keeps its content; upload into another one works */
+    upload_pattern(gl, gs.extra[2], 5);
+    before = s_frames;
+    compose2(gl, gs.target, gs.extra[0], gs.extra[2]);
+    IOSurfaceRef c4 = frame_after(before);
+    if (c4) {
+        uint8_t a[4], b[4];
+        pixel_at(c4, W - 1, H - 1, a);    /* extra[0] = pattern 0 (gradient) */
+        pixel_at(c4, W / 8 + 1, H / 8 + 1, b); /* extra[2] re-uploaded with pattern 5 */
+        const int x = W - 1, y = H - 1;
+        printf("restored buffers composed: rgba(%d,%d,%d) rgba(%d,%d,%d)\n", a[0], a[1], a[2], b[0],
+               b[1], b[2]);
+        CHECK(a[0] == (x & 255) && a[1] == (y & 255) && a[2] == ((x ^ y) & 255),
+              "restored gradient buffer content");
+        CHECK(near(b, 200, 30, 105) || near(b, 200, 200, 105), "re-uploaded buffer content");
+        CFRelease(c4);
+    }
+    if (ref) guest_write(ref, &gs.extra[3], 4); /* refcount pipe accepts writes */
+
+    /* HARNESS_SNAPSHOT_RESAVE=<dir2>: suspend again from the restored process */
+    const char *dir2 = getenv("HARNESS_SNAPSHOT_RESAVE");
+    if (dir2 && *dir2) {
+        char src[1024], dst[1024];
+        snprintf(src, sizeof(src), "%s/before_compose.raw", dir);
+        snprintf(dst, sizeof(dst), "%s/before_compose.raw", dir2);
+        FILE *a = fopen(src, "rb"), *b = fopen(dst, "wb");
+        if (a && b) {
+            char buf[65536];
+            size_t k;
+            while ((k = fread(buf, 1, sizeof(buf), a)) > 0) fwrite(buf, 1, k, b);
+        }
+        if (a) fclose(a);
+        if (b) fclose(b);
+        if (proc2) guest_close(proc2);
+        printf("resave: suspending the restored process into %s\n", dir2);
+        snapshot_save_and_exit(dir2, gl, &gs);
+    }
+
+    for (int i = s_npipes - 1; i >= 0; i--) {
+        if (s_pipes[i]) guest_close(s_pipes[i]);
+    }
+    bql_unlock();
+    p_va_gfx_teardown();
+    printf("%s (%d failures)\n", failures ? "HARNESS FAILED" : "HARNESS PASSED", failures);
+    return failures ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
 
 int main(int argc, char **argv)
 {
@@ -558,6 +1004,8 @@ int main(int argc, char **argv)
     p_va_gfx_renderer_string = dlsym(lib, "va_gfx_renderer_string");
     p_va_gfx_get_gles_version = dlsym(lib, "va_gfx_get_gles_version");
     p_va_gfx_teardown = dlsym(lib, "va_gfx_teardown");
+    p_va_gfx_snapshot_save = dlsym(lib, "va_gfx_snapshot_save");
+    p_va_gfx_snapshot_load = dlsym(lib, "va_gfx_snapshot_load");
     if (!p_va_gfx_init || !p_va_gfx_register_pipe_services || !p_va_gfx_renderer_string ||
         !p_va_gfx_teardown) {
         fprintf(stderr, "dlsym failed\n");
@@ -579,6 +1027,8 @@ int main(int argc, char **argv)
         .sync_timeline_inc = eng_sync_timeline_inc,
         .sync_destroy_timeline = eng_sync_destroy_timeline,
         .sync_register_trigger_wait = eng_sync_register_trigger_wait,
+        .pipe_stream_put_buffer = eng_stream_put,
+        .pipe_stream_get_buffer = eng_stream_get,
     };
     if (p_va_gfx_init(&cfg, &ops, on_present, NULL) != 0) {
         fprintf(stderr, "va_gfx_init failed\n");
@@ -590,7 +1040,10 @@ int main(int argc, char **argv)
     printf("renderer: %s (guest GLES %d.%d)\n", p_va_gfx_renderer_string(), gmaj, gmin);
 
     char path[1024];
+    const char *snap = getenv("HARNESS_SNAPSHOT") ? getenv("HARNESS_SNAPSHOT") : "";
+    const char *snapdir = getenv("HARNESS_SNAPDIR") ? getenv("HARNESS_SNAPDIR") : argv[2];
     bql_lock(); /* we are the "vCPU" now */
+    if (!strcmp(snap, "load")) return snapshot_load_and_continue(snapdir);
 
     /* --- GLProcessPipe handshake (ProcessPipe.cpp) --- */
     FakePipe *proc = guest_open("GLProcessPipe");
@@ -830,10 +1283,12 @@ int main(int argc, char **argv)
         printf("profile: post+readback+present %.2f ms\n", ELAPSED_MS() / n);
     }
     const int frames_before_compose = s_frames;
+    uint32_t compose_target = 0;
 
     /* --- Frame 3: hwcomposer host composition (rcCompose, what EmuHWC2 uses) --- */
     {
         uint32_t target = rcN(gl, OP_rcCreateColorBuffer, 1, 3, W, H, 0x1908);
+        compose_target = target;
         ComposeDeviceV2 dev;
         memset(&dev, 0, sizeof(dev));
         dev.version = 2;
@@ -869,6 +1324,10 @@ int main(int argc, char **argv)
                tl[0], tl[1], tl[2]);
         CHECK(near(c, 255, 255, 0), "center should be the yellow solid-color layer");
         CHECK(near(tl, 0, 0, 128), "top-left should be the gradient layer");
+        if (!strcmp(snap, "save")) {
+            snprintf(path, sizeof(path), "%s/before_compose.raw", snapdir);
+            dump_raw(f3, path);
+        }
         CFRelease(f3);
     }
     bql_lock();
@@ -896,6 +1355,12 @@ int main(int argc, char **argv)
  *                 FrameBuffer lock (another waits on it); teardown must return
  *                 within VA_GFX_TEARDOWN_TIMEOUT_MS and exit() must not hang
      */
+    if (!strcmp(snap, "save")) {
+        GuestState gs = { .w = (uint32_t)W, .h = (uint32_t)H, .puid = puid, .cb1 = cb1,
+                          .cb2 = cb2, .target = compose_target, .ctx = ctx, .surf = surf,
+                          .config = config };
+        snapshot_save_and_exit(snapdir, gl, &gs);
+    }
     const char *exit_mode = getenv("HARNESS_EXIT") ? getenv("HARNESS_EXIT") : "";
     printf("%s (%d failures)\n", failures ? "HARNESS FAILED" : "HARNESS PASSED", failures);
     if (!strcmp(exit_mode, "exit-cleanup-busy")) {

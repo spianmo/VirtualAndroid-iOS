@@ -91,6 +91,8 @@ bool ranchu_gfx_init(const RanchuGfxOptions *opts, VaGfxPresentFn present, void 
         .sync_timeline_inc = goldfish_sync_timeline_inc,
         .sync_destroy_timeline = goldfish_sync_destroy_timeline,
         .sync_register_trigger_wait = goldfish_sync_register_trigger_wait,
+        .pipe_stream_put_buffer = android_pipe_stream_put_buffer,
+        .pipe_stream_get_buffer = android_pipe_stream_get_buffer,
     };
     VaGfxConfig cfg = {
         .display_width = opts->width,

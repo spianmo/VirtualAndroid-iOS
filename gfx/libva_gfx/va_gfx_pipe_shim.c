@@ -43,6 +43,18 @@ static void shim_wake_on(void *pipe, int flags)
     vagfx_pipe_wake_on((VaGfxPipe *)pipe, flags);
 }
 
+static void shim_save(void *pipe, AndroidPipeStream *s)
+{
+    vagfx_pipe_save((VaGfxPipe *)pipe, s);
+}
+
+static void *shim_load(void *hwpipe, void *service_opaque, const char *args,
+                       AndroidPipeStream *s)
+{
+    return vagfx_pipe_load(hwpipe, (const char *)service_opaque, args, s);
+}
+
+/* Snapshot-capable table (the engine provided pipe_stream_* helpers). */
 static const AndroidPipeFuncs kVaGfxPipeFuncs = {
     .init = shim_init,
     .close = shim_close,
@@ -50,7 +62,18 @@ static const AndroidPipeFuncs kVaGfxPipeFuncs = {
     .recvBuffers = shim_recv,
     .poll = shim_poll,
     .wakeOn = shim_wake_on,
-    /* No snapshot support yet: the engine closes these pipes on load. */
+    .save = shim_save,
+    .load = shim_load,
+};
+
+/* Without the stream helpers: not restorable, the engine closes them on load. */
+static const AndroidPipeFuncs kVaGfxPipeFuncsNoSnapshot = {
+    .init = shim_init,
+    .close = shim_close,
+    .sendBuffers = shim_send,
+    .recvBuffers = shim_recv,
+    .poll = shim_poll,
+    .wakeOn = shim_wake_on,
     .save = NULL,
     .load = NULL,
 };
@@ -65,7 +88,11 @@ static const char *const kServices[] = { "opengles", "GLProcessPipe", "refcount"
 
 void vagfx_shim_register_services(const VaGfxEngineOps *engine)
 {
+    const AndroidPipeFuncs *funcs =
+        (engine->pipe_stream_put_buffer && engine->pipe_stream_get_buffer)
+            ? &kVaGfxPipeFuncs
+            : &kVaGfxPipeFuncsNoSnapshot;
     for (size_t i = 0; i < sizeof(kServices) / sizeof(kServices[0]); i++) {
-        engine->pipe_add_type(kServices[i], (void *)kServices[i], &kVaGfxPipeFuncs);
+        engine->pipe_add_type(kServices[i], (void *)kServices[i], funcs);
     }
 }

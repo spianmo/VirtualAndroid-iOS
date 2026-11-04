@@ -27,6 +27,11 @@ int vagfx_pipe_send(VaGfxPipe *pipe, const void *buffers, int num_buffers);
 int vagfx_pipe_recv(VaGfxPipe *pipe, void *buffers, int num_buffers);
 unsigned vagfx_pipe_poll(VaGfxPipe *pipe);
 void vagfx_pipe_wake_on(VaGfxPipe *pipe, int flags);
+/* Snapshot (M4): per-pipe state through the engine's AndroidPipeStream. */
+struct AndroidPipeStream;
+void vagfx_pipe_save(VaGfxPipe *pipe, struct AndroidPipeStream *s);
+VaGfxPipe *vagfx_pipe_load(void *hwpipe, const char *service, const char *args,
+                           struct AndroidPipeStream *s);
 
 /* Implemented in va_gfx_pipe_shim.c. */
 void vagfx_shim_register_services(const VaGfxEngineOps *engine);

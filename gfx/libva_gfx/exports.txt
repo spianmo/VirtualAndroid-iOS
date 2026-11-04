@@ -3,3 +3,5 @@ _va_gfx_register_pipe_services
 _va_gfx_renderer_string
 _va_gfx_get_gles_version
 _va_gfx_teardown
+_va_gfx_snapshot_save
+_va_gfx_snapshot_load

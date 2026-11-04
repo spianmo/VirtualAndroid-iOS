@@ -43,7 +43,8 @@ typedef struct VaGfxFrame {
 
 typedef void (*VaGfxPresentFn)(void *opaque, const VaGfxFrame *frame);
 
-struct AndroidPipeFuncs; /* engine/qemu/include/hw/android/android_pipe.h */
+struct AndroidPipeFuncs;  /* engine/qemu/include/hw/android/android_pipe.h */
+struct AndroidPipeStream; /* idem */
 
 /*
  * Engine entry points handed to libva_gfx, so the library never links
@@ -70,6 +71,16 @@ typedef struct VaGfxEngineOps {
     void (*sync_register_trigger_wait)(void (*trigger_wait)(uint64_t glsync,
                                                             uint64_t thread,
                                                             uint64_t timeline));
+    /*
+     * (gfx, M4) Snapshot stream helpers used by the graphics pipes'
+     * AndroidPipeFuncs.save/load: set them to android_pipe_stream_put_buffer /
+     * android_pipe_stream_get_buffer. If either is NULL, the graphics pipes
+     * register save/load = NULL (they are closed on load, as before M4).
+     */
+    void (*pipe_stream_put_buffer)(struct AndroidPipeStream *s, const void *buf,
+                                   size_t len);
+    size_t (*pipe_stream_get_buffer)(struct AndroidPipeStream *s, void *buf,
+                                     size_t len);
 } VaGfxEngineOps;
 
 /* Call once, before the guest boots (after the android_pipe core is ready). */

@@ -176,7 +176,7 @@ index b413a31..4593ba9 100644
  
  EGLNativeWindowType createSubWindow(FBNativeWindowType p_window, int x, int y, int width,
 diff --git a/host/RenderThread.cpp b/host/RenderThread.cpp
-index 5207b1c..c6bc9eb 100644
+index 5207b1c..b6f19d9 100644
 --- a/host/RenderThread.cpp
 +++ b/host/RenderThread.cpp
 @@ -15,6 +15,8 @@
@@ -198,7 +198,29 @@ index 5207b1c..c6bc9eb 100644
  
  RenderThread::RenderThread(RenderChannelImpl* channel,
                             android::base::Stream* loadStream,
-@@ -459,6 +462,10 @@ intptr_t RenderThread::main() {
+@@ -184,6 +187,21 @@ void RenderThread::save(android::base::Stream* stream) {
+     }
+ }
+ 
++bool RenderThread::waitForSnapshotStep(uint64_t deadlineUs) {
++    AutoLock lock(mLock);
++    while (mState != SnapshotState::Finished && mState != SnapshotState::Empty &&
++           !mFinished.load(std::memory_order_relaxed)) {
++        // |lock| holds mLock; timedWait takes the raw lock and a wall-clock
++        // deadline (getUnixTimeUs).
++        if (!mSnapshotSignal.timedWait(&mLock, deadlineUs)) {
++            if (android::base::getUnixTimeUs() >= deadlineUs) {
++                return false;
++            }
++        }
++    }
++    return true;
++}
++
+ void RenderThread::waitForSnapshotCompletion(AutoLock* lock) {
+     while (mState != SnapshotState::Finished &&
+            !mFinished.load(std::memory_order_relaxed)) {
+@@ -459,6 +477,10 @@ intptr_t RenderThread::main() {
              fflush(dumpFP);
          }
  
@@ -209,6 +231,20 @@ index 5207b1c..c6bc9eb 100644
          bool progress = false;
          anyProgress = false;
          do {
+diff --git a/host/RenderThread.h b/host/RenderThread.h
+index b26c224..626fdfe 100644
+--- a/host/RenderThread.h
++++ b/host/RenderThread.h
+@@ -59,6 +59,9 @@ public:
+ 
+     void pausePreSnapshot();
+     void resume();
++    // VirtualAndroid: wait (bounded) until a pausePreSnapshot()ed or loading
++    // thread has finished its snapshot step (or exited). True when done.
++    bool waitForSnapshotStep(uint64_t deadlineUs);
+     void save(android::base::Stream* stream);
+ 
+     // RenderThreads are blocked from exiting after finished to workaround driver bugs.
 diff --git a/host/RenderThreadInfo.cpp b/host/RenderThreadInfo.cpp
 index f95eeb0..a982cf2 100644
 --- a/host/RenderThreadInfo.cpp
@@ -225,7 +261,7 @@ index f95eeb0..a982cf2 100644
  RenderThreadInfo::RenderThreadInfo() {
      s_threadInfoPtr = this;
 diff --git a/host/RendererImpl.cpp b/host/RendererImpl.cpp
-index 2bfc710..c8e27ae 100644
+index 2bfc710..592f524 100644
 --- a/host/RendererImpl.cpp
 +++ b/host/RendererImpl.cpp
 @@ -13,6 +13,8 @@
@@ -245,6 +281,62 @@ index 2bfc710..c8e27ae 100644
                      FrameBuffer::getFB()->cleanupProcGLObjects(resources.puid);
                      // resources.resource are destroyed automatically when going out of the scope.
                      return WorkerProcessingResult::Continue;
+@@ -355,6 +358,37 @@ void RendererImpl::pauseAllPreSave() {
+     waitForProcessCleanup();
+ }
+ 
++bool RendererImpl::waitForSnapshotSteps(uint64_t deadlineUs) {
++    std::vector<std::shared_ptr<RenderChannelImpl>> channels;
++    {
++        android::base::AutoLock lock(mChannelsLock);
++        channels = mChannels;
++    }
++    for (const auto& c : channels) {
++        if (!c->renderThread()->waitForSnapshotStep(deadlineUs)) return false;
++    }
++    return true;
++}
++
++void RendererImpl::pauseRenderThreadsPreSave() {
++    android::base::AutoLock lock(mChannelsLock);
++    if (mStopped) return;
++    // Drop channels whose render thread already exited (closed pipes).
++    mChannels.erase(std::remove_if(mChannels.begin(), mChannels.end(),
++                                   [](const std::shared_ptr<RenderChannelImpl>& c) {
++                                       return c->renderThread()->isFinished();
++                                   }),
++                    mChannels.end());
++    for (const auto& c : mChannels) {
++        c->renderThread()->pausePreSnapshot();
++    }
++}
++
++size_t RendererImpl::numChannels() {
++    android::base::AutoLock lock(mChannelsLock);
++    return mChannels.size();
++}
++
+ void RendererImpl::resumeAll() {
+     {
+         android::base::AutoLock lock(mAddressSpaceRenderThreadLock);
+diff --git a/host/RendererImpl.h b/host/RendererImpl.h
+index d0cb905..aaf9ebc 100644
+--- a/host/RendererImpl.h
++++ b/host/RendererImpl.h
+@@ -104,6 +104,13 @@ public:
+ 
+     void pauseAllPreSave() final;
+     void resumeAll() final;
++    // VirtualAndroid: bounded wait until every render thread finished its
++    // snapshot step (save after pauseAllPreSave, or restore after load).
++    bool waitForSnapshotSteps(uint64_t deadlineUs);
++    // VirtualAndroid: pauseAllPreSave without the unbounded process-cleanup
++    // wait (the caller drains the cleanup thread with its own deadline).
++    void pauseRenderThreadsPreSave();
++    size_t numChannels();
+ 
+     void save(android::base::Stream* stream,
+               const android::snapshot::ITextureSaverPtr& textureSaver) final;
 diff --git a/host/SyncThread.cpp b/host/SyncThread.cpp
 index 15e531f..509d5b7 100644
 --- a/host/SyncThread.cpp
@@ -266,6 +358,181 @@ index 15e531f..509d5b7 100644
      static thread_local std::once_flag sOnceFlag;
      std::call_once(sOnceFlag, [&] {
          GFXSTREAM_TRACE_NAME_TRACK(GFXSTREAM_TRACE_TRACK_FOR_CURRENT_THREAD(), "SyncThread");
+diff --git a/host/SyncThread.h b/host/SyncThread.h
+index 538bdf3..388b69d 100644
+--- a/host/SyncThread.h
++++ b/host/SyncThread.h
+@@ -109,6 +109,9 @@ class SyncThread : public android::base::Thread {
+ 
+     // Obtains the global sync thread.
+     static SyncThread* get();
++    // VirtualAndroid: wait until every queued sync command ran (snapshot save:
++    // trigger-wait results reach the device before its state is saved).
++    void drainForSnapshot() { mWorkerThreadPool.waitAllItems(); }
+ 
+     // Destroys and cleanup the global sync thread.
+     static void destroy();
+diff --git a/host/VaSnapshot.cpp b/host/VaSnapshot.cpp
+new file mode 100644
+index 0000000..ad7ae67
+--- /dev/null
++++ b/host/VaSnapshot.cpp
+@@ -0,0 +1,109 @@
++// VirtualAndroid: see VaSnapshot.h.
++#include "VaSnapshot.h"
++
++#include <cstdio>
++#include <memory>
++
++#include "FrameBuffer.h"
++#include "RendererImpl.h"
++#include "SyncThread.h"
++#include "aemu/base/files/StdioStream.h"
++#include "host-common/opengles.h"
++#include "snapshot/TextureLoader.h"
++#include "snapshot/TextureSaver.h"
++
++using android::base::StdioStream;
++
++namespace {
++
++gfxstream::RendererImpl* impl() {
++    const auto& r = android_getOpenglesRenderer();
++    return static_cast<gfxstream::RendererImpl*>(r.get());
++}
++
++// Leaked on purpose (may be used by the background loader during exit).
++std::shared_ptr<android::snapshot::TextureLoader>& loaderRef() {
++    static auto* p = new std::shared_ptr<android::snapshot::TextureLoader>;
++    return *p;
++}
++
++}  // namespace
++
++extern "C" int gfxstream_va_drain_process_cleanup(void) {
++    auto* r = impl();
++    if (!r) return 0;
++    r->waitForProcessCleanup();
++    return 1;
++}
++
++extern "C" void gfxstream_va_pause_render_threads(void) {
++    if (auto* r = impl()) r->pauseRenderThreadsPreSave();
++}
++
++extern "C" int gfxstream_va_wait_snapshot_steps(uint64_t deadlineUs) {
++    auto* r = impl();
++    return r ? (r->waitForSnapshotSteps(deadlineUs) ? 1 : 0) : 0;
++}
++
++extern "C" int gfxstream_va_save(void* stream, const char* textureFile, uint64_t* textureBytes) {
++    auto* r = impl();
++    if (!r || !stream || !textureFile) return 0;
++    FILE* f = fopen(textureFile, "wb");
++    if (!f) return 0;
++    auto saver = std::make_shared<android::snapshot::TextureSaver>(
++        StdioStream(f, StdioStream::kOwner));
++    android::snapshot::ITextureSaverPtr ptr = saver;
++    r->save(static_cast<android::base::Stream*>(stream), ptr);
++    saver->done();
++    if (textureBytes) *textureBytes = saver->diskSize();
++    return saver->hasError() ? 0 : 1;
++}
++
++extern "C" int gfxstream_va_load(void* stream, const char* textureFile) {
++    auto* r = impl();
++    if (!r || !stream || !textureFile) return 0;
++    FILE* f = fopen(textureFile, "rb");
++    if (!f) return 0;
++    gfxstream_va_release_texture_loader();
++    auto loader = std::make_shared<android::snapshot::TextureLoader>(
++        StdioStream(f, StdioStream::kOwner));
++    loaderRef() = loader;
++    android::snapshot::ITextureLoaderPtr ptr = loader;
++    const bool ok = r->load(static_cast<android::base::Stream*>(stream), ptr);
++    return (ok && !loader->hasError()) ? 1 : 0;
++}
++
++extern "C" void gfxstream_va_drain_sync_thread(void) {
++    if (auto* t = gfxstream::SyncThread::get()) t->drainForSnapshot();
++}
++
++extern "C" void gfxstream_va_resume_all(void) {
++    if (auto* r = impl()) r->resumeAll();
++}
++
++extern "C" int gfxstream_va_repost(void) {
++    auto* fb = gfxstream::FrameBuffer::getFB();
++    return (fb && fb->repost()) ? 1 : 0;
++}
++
++extern "C" size_t gfxstream_va_num_render_threads(void) {
++    auto* r = impl();
++    return r ? r->numChannels() : 0;
++}
++
++extern "C" void gfxstream_va_finish_texture_loading(void) {
++    auto& loader = loaderRef();
++    if (loader) {
++        loader->join();  // every texture restored (lazy loads are done too)
++        loader.reset();
++    }
++}
++
++extern "C" void gfxstream_va_release_texture_loader(void) {
++    auto& loader = loaderRef();
++    if (loader) {
++        loader->interrupt();
++        loader->join();
++        loader.reset();
++    }
++}
+diff --git a/host/VaSnapshot.h b/host/VaSnapshot.h
+new file mode 100644
+index 0000000..d920132
+--- /dev/null
++++ b/host/VaSnapshot.h
+@@ -0,0 +1,40 @@
++// VirtualAndroid: small C API over gfxstream's snapshot machinery, so the
++// embedder glue (libva_gfx) does not need FrameBuffer/RendererImpl headers.
++// Streams are android::base::Stream* passed as void*.
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// Waits for the process-cleanup thread to drain (unbounded: run it on a
++// helper thread). Returns 1 if a renderer exists.
++int gfxstream_va_drain_process_cleanup(void);
++// Puts every live render thread into snapshot-save mode (non-blocking).
++void gfxstream_va_pause_render_threads(void);
++// 1 when every render thread finished its snapshot step (save after a
++// pause, or restore after a load) before deadlineUs (getUnixTimeUs clock).
++int gfxstream_va_wait_snapshot_steps(uint64_t deadlineUs);
++// Saves the FrameBuffer into |stream|; texture contents go to textureFile.
++int gfxstream_va_save(void* stream, const char* textureFile, uint64_t* textureBytes);
++// Loads the FrameBuffer; textures load lazily (and in the background) from
++// textureFile, which must stay readable until gfxstream_va_release_texture_loader().
++int gfxstream_va_load(void* stream, const char* textureFile);
++// Waits until every queued SyncThread command ran (trigger-wait results are
++// delivered to the goldfish_sync device). Unbounded: run it on a helper thread.
++void gfxstream_va_drain_sync_thread(void);
++void gfxstream_va_resume_all(void);
++// Re-posts the last posted ColorBuffer (presents it again). 1 on success.
++int gfxstream_va_repost(void);
++size_t gfxstream_va_num_render_threads(void);
++// Before saving again after a load: wait for the background texture loader
++// to restore every texture (it iterates the map a save clears), then drop it.
++void gfxstream_va_finish_texture_loading(void);
++void gfxstream_va_release_texture_loader(void);
++
++#ifdef __cplusplus
++}
++#endif
 diff --git a/host/backend/meson.build b/host/backend/meson.build
 index b47d2ed..1dc720c 100644
 --- a/host/backend/meson.build
@@ -376,10 +643,19 @@ index 167772c..ea7289b 100644
      sEgl2EglSyncSafeToUse = true;
      m_engine = EglOS::
 diff --git a/host/gl/glestranslator/EGL/EglOsApi_egl.cpp b/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
-index 2fca845..b513b0a 100644
+index 2fca845..e0b5666 100644
 --- a/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
 +++ b/host/gl/glestranslator/EGL/EglOsApi_egl.cpp
-@@ -81,8 +81,16 @@ static const char* kGLES2LibName = "libGLESv2.so";
+@@ -16,6 +16,8 @@
+ 
+ #include "EglOsApi.h"
+ 
++#include <dlfcn.h>
++
+ #include "aemu/base/system/System.h"
+ #include "aemu/base/SharedLibrary.h"
+ #include "host-common/logging.h"
+@@ -81,8 +83,16 @@ static const char* kGLES2LibName = "libGLESv2.so";
  
  #include "MacNative.h"
  
@@ -398,7 +674,7 @@ index 2fca845..b513b0a 100644
  
  #endif // __APPLE__
  
-@@ -170,6 +178,13 @@ public:
+@@ -170,6 +180,13 @@ public:
      this->function_name =                                              \
              reinterpret_cast<return_type(GL_APIENTRY*) signature>(     \
                      mLib->findSymbol(#function_name));                 \
@@ -412,6 +688,39 @@ index 2fca845..b513b0a 100644
      if (!this->function_name) {                                        \
          this->function_name =                                          \
                  reinterpret_cast<return_type(GL_APIENTRY*) signature>( \
+@@ -213,12 +230,31 @@ public:
+         if (!mLib) {
+             return NULL;
+         }
+-        return reinterpret_cast<GlFunctionPointer>(mLib->findSymbol(name));
++        void* p = reinterpret_cast<void*>(mLib->findSymbol(name));
++#ifdef __APPLE__
++        // VirtualAndroid: on Apple, dlsym(handle) falls back to every loaded
++        // image, so names ANGLE does not export (glGetTexImage, ...) bind to
++        // the system desktop libGL, which crashes without a CGL context. Only
++        // accept symbols from the ANGLE library itself.
++        if (p) {
++            if (!mImageBase) {
++                Dl_info self;
++                void* anchor = reinterpret_cast<void*>(mLib->findSymbol("glGetString"));
++                if (anchor && dladdr(anchor, &self)) mImageBase = self.dli_fbase;
++            }
++            Dl_info info;
++            if (mImageBase && (!dladdr(p, &info) || info.dli_fbase != mImageBase)) {
++                return NULL;
++            }
++        }
++#endif
++        return reinterpret_cast<GlFunctionPointer>(p);
+     }
+     ~EglOsGlLibrary() = default;
+ 
+ private:
+     android::base::SharedLibrary* mLib = nullptr;
++    void* mImageBase = nullptr;  // VirtualAndroid: see findSymbol()
+ };
+ 
+ class EglOsEglPixelFormat : public EglOS::PixelFormat {
 diff --git a/host/gl/glestranslator/EGL/MacNative.h b/host/gl/glestranslator/EGL/MacNative.h
 index ab20905..cae7a84 100644
 --- a/host/gl/glestranslator/EGL/MacNative.h
@@ -493,11 +802,54 @@ index 513aa3b..0e3a1d1 100644
    include_directories: [inc_gfxstream_include, inc_include, inc_gl_common, inc_apigen_codec,
                          inc_gl_host_common, inc_stream_servers, inc_etc],
    link_with: [lib_gl_common, lib_apigen_codec, lib_gl_host_common],
+diff --git a/host/gl/glestranslator/GLcommon/GLBackgroundLoader.cpp b/host/gl/glestranslator/GLcommon/GLBackgroundLoader.cpp
+index e13de34..727ee5a 100644
+--- a/host/gl/glestranslator/GLcommon/GLBackgroundLoader.cpp
++++ b/host/gl/glestranslator/GLcommon/GLBackgroundLoader.cpp
+@@ -16,6 +16,8 @@
+ 
+ #include "GLcommon/GLBackgroundLoader.h"
+ 
++#include "ExitGate.h"
++
+ #include "GLcommon/GLEScontext.h"
+ #include "GLcommon/SaveableTexture.h"
+ #include "aemu/base/system/System.h"
+@@ -57,6 +59,7 @@ intptr_t GLBackgroundLoader::main() {
+ 
+         const SaveableTexturePtr& saveable = it.second;
+         if (saveable) {
++            gfxstream::exit_gate::Scope exitGate;  // VirtualAndroid: park once exit() begins
+             m_glesIface.restoreTexture(saveable.get());
+             // allow other threads to run for a while
+             ptr.reset();
+diff --git a/host/gl/glestranslator/GLcommon/SaveableTexture.cpp b/host/gl/glestranslator/GLcommon/SaveableTexture.cpp
+index 048400c..a1304bb 100644
+--- a/host/gl/glestranslator/GLcommon/SaveableTexture.cpp
++++ b/host/gl/glestranslator/GLcommon/SaveableTexture.cpp
+@@ -376,7 +376,8 @@ struct TextureDataReader {
+         auto gl = GLEScontext::dispatcher();
+         if (!gl.glGetTexImage) return true;
+ 
+-        // TODO: if (isGles2Gles()) return true
++        // VirtualAndroid: GLES (ANGLE) has no glGetTexImage.
++        if (isGles2Gles()) return true;
+ 
+         // TODO: Query extensions for support for these kinds of things
+         if (target != GL_TEXTURE_2D || level != 0) return false;
 diff --git a/host/meson.build b/host/meson.build
-index 362af0a..bf25cbd 100644
+index 362af0a..1390e69 100644
 --- a/host/meson.build
 +++ b/host/meson.build
-@@ -234,8 +234,11 @@ endif
+@@ -196,6 +196,7 @@ files_lib_gfxstream_backend = files(
+   'VirtioGpuRingBlob.cpp',
+   'VirtioGpuTimelines.cpp',
+   'VsyncThread.cpp',
++  'VaSnapshot.cpp',
+ )
+ 
+ if use_gles or use_vulkan
+@@ -234,8 +235,11 @@ endif
  
  if not use_gles
    files_lib_gfxstream_backend += files('NativeSubWindow_stub.cpp')
@@ -510,7 +862,7 @@ index 362af0a..bf25cbd 100644
  elif host_machine.system() == 'windows'
    files_lib_gfxstream_backend += files('NativeSubWindow_win32.cpp')
  elif host_machine.system() == 'linux' and use_gles
-@@ -282,6 +285,7 @@ gfxstream_backend = library(
+@@ -282,6 +286,7 @@ gfxstream_backend = library(
    'gfxstream_backend',
    files_lib_gfxstream_backend,
    cpp_args: gfxstream_host_args + gfxstream_backend_cpp_args,

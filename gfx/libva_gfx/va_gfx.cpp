@@ -63,6 +63,8 @@
 #include "host-common/window_agent.h"
 #include "render-utils/RenderLib.h"
 #include "render-utils/render_api.h"
+#include "VaSnapshot.h"
+#include "aemu/base/files/MemStream.h"
 #include "ExitGate.h"
 
 #define VLOG(fmt, ...) fprintf(stderr, "va_gfx: " fmt "\n", ##__VA_ARGS__)
@@ -98,6 +100,12 @@ struct State {
     // gfxstream: an embedder exit notifier that calls va_gfx_teardown() or
     // closes pipes later in exit() would otherwise use destroyed globals.
     std::atomic<bool> processExiting{false};
+    // Snapshot (M4). snapState: 0 = running, 1 = render threads paused by a
+    // save, 2 = restored by a load; both wait for resumeAfterSnapshot().
+    std::atomic<int> snapState{0};
+    std::atomic<bool> snapBusy{false};  // a save/load helper is still running
+    std::atomic<int> livePipes{0};
+    std::mutex snapLock;
 };
 
 // Never destroyed (see "Lifetime" above).
@@ -116,7 +124,7 @@ struct EngineCallbackScope {
 // ---------------------------------------------------------------------------
 
 struct DeferredOp {
-    enum Kind { kWake, kClose } kind;
+    enum Kind { kWake, kClose, kResume } kind;
     VaGfxPipe* pipe;
     unsigned flags;
 };
@@ -151,6 +159,19 @@ public:
             mQueue.push_back(op);
         }
         mCv.notify_one();
+    }
+
+    // Wake/close flags still queued for |pipe| (snapshot save: the waker is
+    // blocked on the BQL, so these were never delivered to the device).
+    unsigned pendingFlagsFor(VaGfxPipe* pipe) {
+        std::lock_guard<std::mutex> lock(mLock);
+        unsigned flags = 0;
+        for (const auto& op : mQueue) {
+            if (op.pipe != pipe) continue;
+            if (op.kind == DeferredOp::kWake) flags |= op.flags;
+            if (op.kind == DeferredOp::kClose) flags |= PIPE_WAKE_CLOSED;
+        }
+        return flags;
     }
 
     // Called with the BQL held (pipe close), so it cannot race with run()'s
@@ -205,6 +226,7 @@ Waker& waker() {
 }
 
 void onProcessExit();  // atexit handler, defined below va_gfx_init
+void resumeAfterSnapshot(int waitMs, const char* who);
 
 }  // namespace
 
@@ -230,6 +252,11 @@ std::atomic<int> sNextPipeId{1};
 void performOp(const DeferredOp& op) {
     if (g.shutdown.load()) return;
     switch (op.kind) {
+        case DeferredOp::kResume:
+            // Runs once the BQL is free again, i.e. after the engine finished
+            // saving/loading every graphics pipe.
+            resumeAfterSnapshot(2000, "after snapshot");
+            break;
         case DeferredOp::kWake:
             if (!op.pipe->hostClosed && g.engine.pipe_host_signal_wake) {
                 g.engine.pipe_host_signal_wake(op.pipe->hwpipe, op.flags);
@@ -304,6 +331,7 @@ extern "C" VaGfxPipe* vagfx_pipe_open(void* hwpipe, const char* service, const c
         return nullptr;
     }
     p->aemuPipe = pipe;
+    g.livePipes++;
     return p;
 }
 
@@ -311,6 +339,8 @@ extern "C" void vagfx_pipe_close(VaGfxPipe* p) {
     EngineCallbackScope scope;
     if (!p) return;
     if (g.processExiting.load()) return;  // leak: don't wake render threads during exit()
+    if (g.snapState.load()) resumeAfterSnapshot(0, "pipe close");
+    g.livePipes--;
     if (p->aemuPipe) {
         android_pipe_guest_close(p->aemuPipe, PIPE_CLOSE_GRACEFUL);
         p->aemuPipe = nullptr;
@@ -322,6 +352,7 @@ extern "C" void vagfx_pipe_close(VaGfxPipe* p) {
 extern "C" int vagfx_pipe_send(VaGfxPipe* p, const void* buffers, int n) {
     EngineCallbackScope scope;
     if (g.processExiting.load()) return PIPE_ERROR_IO;
+    if (g.snapState.load()) resumeAfterSnapshot(0, "pipe send");
     return android_pipe_guest_send(&p->aemuPipe, static_cast<const AndroidPipeBuffer*>(buffers),
                                    n);
 }
@@ -329,6 +360,7 @@ extern "C" int vagfx_pipe_send(VaGfxPipe* p, const void* buffers, int n) {
 extern "C" int vagfx_pipe_recv(VaGfxPipe* p, void* buffers, int n) {
     EngineCallbackScope scope;
     if (g.processExiting.load()) return PIPE_ERROR_IO;
+    if (g.snapState.load()) resumeAfterSnapshot(0, "pipe recv");
     return android_pipe_guest_recv(p->aemuPipe, static_cast<AndroidPipeBuffer*>(buffers), n);
 }
 
@@ -341,7 +373,307 @@ extern "C" unsigned vagfx_pipe_poll(VaGfxPipe* p) {
 extern "C" void vagfx_pipe_wake_on(VaGfxPipe* p, int flags) {
     EngineCallbackScope scope;
     if (g.processExiting.load()) return;
+    if (g.snapState.load()) resumeAfterSnapshot(0, "pipe wakeOn");
     android_pipe_guest_wake_on(p->aemuPipe, static_cast<unsigned>(flags));
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot (M4): renderer section + per-pipe state
+// ---------------------------------------------------------------------------
+//
+// Save (engine: VM stopped, BQL held, our section before the pipe device):
+//   va_gfx_snapshot_save: drain process cleanup, park every render thread at
+//   its snapshot point (bounded), save the FrameBuffer (+ textures to
+//   aux_dir) -> io. Render threads stay parked; each pipe's save then writes
+//   its channel/render-thread state. Resume happens once the BQL is free again
+//   (waker kResume) or on the next pipe callback, whichever is first.
+// Load (fresh renderer): va_gfx_snapshot_load restores the FrameBuffer and
+//   re-presents the last frame; each pipe's load recreates its channel and
+//   render thread, which restores its state and parks; same resume rule.
+// All waits that could involve renderer threads run on a helper thread with
+// a deadline (VA_GFX_SNAPSHOT_TIMEOUT_MS, default 10 s); on timeout the call
+// fails instead of blocking the BQL holder.
+
+namespace {
+
+constexpr uint32_t kSectionMagic = 0x56414758;  // 'VAGX'
+constexpr uint32_t kSectionVersion = 1;
+constexpr uint32_t kPipeMagic = 0x56414750;     // 'VAGP'
+constexpr uint32_t kPipeVersion = 1;
+constexpr char kTextureFile[] = "gfx-textures.bin";
+
+uint64_t nowUs() { return android::base::getUnixTimeUs(); }
+
+long snapshotTimeoutMs() {
+    const char* t = getenv("VA_GFX_SNAPSHOT_TIMEOUT_MS");
+    return t ? atol(t) : 10000;
+}
+
+::Stream* asCStream(android::base::Stream* s) { return reinterpret_cast<::Stream*>(s); }
+
+void resumeAfterSnapshot(int waitMs, const char* who) {
+    if (!g.snapState.load() || g.snapBusy.load()) return;
+    std::lock_guard<std::mutex> lock(g.snapLock);
+    const int st = g.snapState.load();
+    if (!st || g.snapBusy.load()) return;
+    if (!gfxstream_va_wait_snapshot_steps(nowUs() + (uint64_t)waitMs * 1000)) {
+        if (waitMs > 0) VLOG("snapshot: render threads not ready to resume yet (%s)", who);
+        return;  // try again on the next pipe callback
+    }
+    gfxstream_va_resume_all();
+    g.snapState.store(0);
+    VLOG("snapshot: renderer resumed (%s, %s)", st == 1 ? "after save" : "after load", who);
+}
+
+// A helper-thread job the BQL holder waits for with a deadline.
+struct SnapJob {
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+    bool ok = false;
+    std::atomic<bool> cancelled{false};
+    android::base::MemStream state;
+    uint64_t textureBytes = 0;
+    double msCleanup = 0, msPause = 0, msRenderer = 0, msRepost = 0, msSync = 0;
+
+    void finish(bool success) {
+        std::lock_guard<std::mutex> lock(m);
+        ok = success;
+        done = true;
+        cv.notify_all();
+    }
+    bool waitFor(long timeoutMs) {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return done; });
+        return done;
+    }
+};
+
+double msSince(uint64_t t0) { return (nowUs() - t0) / 1000.0; }
+
+bool ioWrite(const VaGfxSnapshotIo* io, const void* buf, size_t len) {
+    return io->write(io->opaque, buf, len) == 0;
+}
+bool ioWrite32(const VaGfxSnapshotIo* io, uint32_t v) { return ioWrite(io, &v, 4); }
+bool ioRead(const VaGfxSnapshotIo* io, void* buf, size_t len) {
+    return io->read(io->opaque, buf, len) == 0;
+}
+bool ioRead32(const VaGfxSnapshotIo* io, uint32_t* v) { return ioRead(io, v, 4); }
+
+void put32(struct AndroidPipeStream* s, uint32_t v) {
+    g.engine.pipe_stream_put_buffer(s, &v, sizeof(v));
+}
+bool get32(struct AndroidPipeStream* s, uint32_t* v) {
+    return g.engine.pipe_stream_get_buffer(s, v, sizeof(*v)) == sizeof(*v);
+}
+
+}  // namespace
+
+extern "C" void vagfx_pipe_save(VaGfxPipe* p, struct AndroidPipeStream* s) {
+    EngineCallbackScope scope;
+    const bool restorable = g.snapState.load() == 1 && !g.snapBusy.load() && p->aemuPipe &&
+                            !p->hostClosed && !g.shutdown.load();
+    android::base::MemStream ms;
+    if (restorable) {
+        // aemu AndroidPipe::saveToStream: service, args, pipe state (for
+        // opengles: unread reply bytes + RenderChannel queues + the parked
+        // RenderThread's state).
+        android_pipe_guest_save(p->aemuPipe, asCStream(&ms));
+    }
+    put32(s, kPipeMagic);
+    put32(s, kPipeVersion);
+    put32(s, restorable ? 1 : 0);
+    put32(s, waker().pendingFlagsFor(p));
+    const auto& buf = ms.buffer();
+    const uint32_t len = restorable ? (uint32_t)ms.writtenSize() : 0;
+    put32(s, len);
+    if (len) g.engine.pipe_stream_put_buffer(s, buf.data(), len);
+    if (!restorable) VLOG("snapshot: pipe '%s' saved as not restorable", p->service.c_str());
+}
+
+extern "C" VaGfxPipe* vagfx_pipe_load(void* hwpipe, const char* service, const char* args,
+                                      struct AndroidPipeStream* s) {
+    EngineCallbackScope scope;
+    uint32_t magic = 0, version = 0, restorable = 0, pending = 0, len = 0;
+    if (!get32(s, &magic) || !get32(s, &version) || !get32(s, &restorable) ||
+        !get32(s, &pending) || !get32(s, &len) || magic != kPipeMagic ||
+        version != kPipeVersion) {
+        VLOG("snapshot: bad pipe record for '%s'", service);
+        return nullptr;
+    }
+    android::base::MemStream::Buffer data(len);
+    if (len && g.engine.pipe_stream_get_buffer(s, data.data(), len) != len) return nullptr;
+    if (!restorable || g.snapState.load() != 2 || g.shutdown.load() || !g.renderer) {
+        return nullptr;  // engine closes it; the guest reconnects
+    }
+    android::base::MemStream ms(std::move(data));
+    auto* p = new VaGfxPipe{&kHwFuncs, hwpipe, nullptr, sNextPipeId++, false, service};
+    char forceClose = 0;
+    void* pipe = android_pipe_guest_load(asCStream(&ms), p, &forceClose);
+    if (!pipe || forceClose) {
+        VLOG("snapshot: pipe '%s' could not be restored", service);
+        if (pipe) android_pipe_guest_close(pipe, PIPE_CLOSE_LOAD_SNAPSHOT);
+        delete p;
+        return nullptr;
+    }
+    p->aemuPipe = pipe;
+    g.livePipes++;
+    // Wakes that were queued but not yet delivered at save time: deliver them
+    // once the BQL is free (the engine has restored this pipe by then).
+    if (pending & PIPE_WAKE_CLOSED) {
+        waker().push({DeferredOp::kClose, p, 0});
+    } else if (pending & (PIPE_WAKE_READ | PIPE_WAKE_WRITE)) {
+        waker().push({DeferredOp::kWake, p, pending & (PIPE_WAKE_READ | PIPE_WAKE_WRITE)});
+    }
+    return p;
+}
+
+extern "C" __attribute__((visibility("default"))) int va_gfx_snapshot_save(
+    const VaGfxSnapshotIo* io, const char* aux_dir) {
+    if (!g.initialized || g.shutdown.load() || !g.renderer || !io || !io->write || !aux_dir) {
+        return -1;
+    }
+    if (g.snapBusy.load()) {
+        VLOG("snapshot save: a previous snapshot operation is still running");
+        return -1;
+    }
+    if (g.snapState.load()) resumeAfterSnapshot(1000, "before save");  // save without running
+    if (g.snapState.load()) return -1;
+
+    const uint64_t t0 = nowUs();
+    const std::string texturePath = std::string(aux_dir) + "/" + kTextureFile;
+    const uint32_t w = g.cfg.display_width, h = g.cfg.display_height;
+    auto job = std::make_shared<SnapJob>();
+    g.snapBusy.store(true);
+    std::thread([job, texturePath, w, h] {
+        pthread_setname_np("va-gfx-snapshot");
+        uint64_t t = nowUs();
+        gfxstream_va_drain_process_cleanup();  // a half-dead guest process can block this
+        job->msCleanup = msSince(t);
+        if (job->cancelled.load()) {
+            g.snapBusy.store(false);
+            job->finish(false);
+            return;
+        }
+        gfxstream_va_finish_texture_loading();  // after a load: textures fully restored
+        job->msCleanup = msSince(t);
+        t = nowUs();
+        gfxstream_va_pause_render_threads();
+        const uint64_t deadline = nowUs() + (uint64_t)snapshotTimeoutMs() * 1000;
+        bool ok = gfxstream_va_wait_snapshot_steps(deadline) && !job->cancelled.load();
+        job->msPause = msSince(t);
+        if (ok) {
+            t = nowUs();
+            auto* ms = &job->state;
+            ms->putBe32(w);
+            ms->putBe32(h);
+            android_pipe_guest_pre_save(asCStream(ms));  // service state (GLProcessPipe ids)
+            ok = gfxstream_va_save(ms, texturePath.c_str(), &job->textureBytes) == 1;
+            job->msRenderer = msSince(t);
+            // Deliver pending trigger-wait results (timeline_inc) now, so they
+            // land in goldfish_sync's queue before that device is saved.
+            t = nowUs();
+            gfxstream_va_drain_sync_thread();
+            job->msSync = msSince(t);
+        }
+        if (!ok || job->cancelled.load()) {
+            gfxstream_va_resume_all();  // failed or abandoned: let the guest run on
+            ok = false;
+        }
+        g.snapBusy.store(false);
+        job->finish(ok);
+    }).detach();
+
+    if (!job->waitFor(snapshotTimeoutMs())) {
+        job->cancelled.store(true);
+        VLOG("snapshot save: timed out after %ld ms (render threads busy?)", snapshotTimeoutMs());
+        return -1;
+    }
+    if (!job->ok) {
+        VLOG("snapshot save: renderer save failed");
+        return -1;
+    }
+    const auto& buf = job->state.buffer();
+    const uint64_t len = (uint64_t)job->state.writtenSize();
+    const bool written = ioWrite32(io, kSectionMagic) && ioWrite32(io, kSectionVersion) &&
+                         ioWrite(io, &len, sizeof(len)) && ioWrite(io, buf.data(), len);
+    g.snapState.store(1);
+    waker().push({DeferredOp::kResume, nullptr, 0});
+    VLOG("snapshot save: %s in %.1f ms (cleanup %.1f, park %zu render threads %.1f, renderer "
+         "%.1f, sync drain %.1f); state %llu bytes, textures %llu bytes in %s",
+         written ? "ok" : "io write FAILED", msSince(t0), job->msCleanup,
+         gfxstream_va_num_render_threads(), job->msPause, job->msRenderer, job->msSync,
+         (unsigned long long)len, (unsigned long long)job->textureBytes, texturePath.c_str());
+    return written ? 0 : -1;
+}
+
+extern "C" __attribute__((visibility("default"))) int va_gfx_snapshot_load(
+    const VaGfxSnapshotIo* io, const char* aux_dir) {
+    if (!g.initialized || g.shutdown.load() || !g.renderer || !io || !io->read || !aux_dir) {
+        return -1;
+    }
+    if (g.livePipes.load() > 0 || g.snapBusy.load() || g.snapState.load()) {
+        VLOG("snapshot load: renderer is not fresh (%d live pipes)", g.livePipes.load());
+        return -1;
+    }
+    const uint64_t t0 = nowUs();
+    uint32_t magic = 0, version = 0;
+    uint64_t len = 0;
+    if (!ioRead32(io, &magic) || !ioRead32(io, &version) || !ioRead(io, &len, sizeof(len)) ||
+        magic != kSectionMagic || version != kSectionVersion || len > (1ull << 31)) {
+        VLOG("snapshot load: bad section header");
+        return -1;
+    }
+    android::base::MemStream::Buffer data(len);
+    if (len && !ioRead(io, data.data(), len)) return -1;
+    const double msRead = msSince(t0);
+
+    const std::string texturePath = std::string(aux_dir) + "/" + kTextureFile;
+    const uint32_t w = g.cfg.display_width, h = g.cfg.display_height;
+    auto job = std::make_shared<SnapJob>();
+    job->state = android::base::MemStream(std::move(data));
+    g.snapBusy.store(true);
+    std::thread([job, texturePath, w, h] {
+        pthread_setname_np("va-gfx-snapshot");
+        auto* ms = &job->state;
+        bool ok = ms->getBe32() == w && ms->getBe32() == h;
+        if (!ok) VLOG("snapshot load: display size differs from the saved one");
+        if (ok) {
+            android_pipe_guest_pre_load(asCStream(ms));  // service state (GLProcessPipe ids)
+            // pre_load defers pipe wakes until post_load; restore the normal
+            // mode right away (no pipes exist yet). An empty service list makes
+            // every service run its postLoad(NULL), which is harmless here.
+            android::base::MemStream none;
+            none.putBe16(0);
+            android_pipe_guest_post_load(asCStream(&none));
+            const uint64_t t = nowUs();
+            ok = gfxstream_va_load(ms, texturePath.c_str()) == 1;
+            job->msRenderer = msSince(t);
+        }
+        if (ok) {
+            const uint64_t t = nowUs();
+            gfxstream_va_repost();  // present the last guest frame again
+            job->msRepost = msSince(t);
+        }
+        g.snapBusy.store(false);
+        job->finish(ok);
+    }).detach();
+
+    if (!job->waitFor(snapshotTimeoutMs())) {
+        job->cancelled.store(true);
+        VLOG("snapshot load: timed out after %ld ms", snapshotTimeoutMs());
+        return -1;
+    }
+    if (!job->ok) {
+        VLOG("snapshot load: renderer load failed");
+        return -1;
+    }
+    g.snapState.store(2);
+    waker().push({DeferredOp::kResume, nullptr, 0});
+    VLOG("snapshot load: ok in %.1f ms (read %.1f, renderer %.1f, re-present %.1f); state %llu "
+         "bytes",
+         msSince(t0), msRead, job->msRenderer, job->msRepost, (unsigned long long)len);
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -966,6 +1298,12 @@ extern "C" __attribute__((visibility("default"))) void va_gfx_teardown(void) {
     std::thread([job, readback, renderer = std::move(renderer)]() mutable {
         pthread_setname_np("va-gfx-teardown");
         vagfx_present_gl_disable();  // waits for an in-flight zero-copy post
+        if (renderer && g.snapState.load() && !g.snapBusy.load()) {
+            // Parked by a snapshot: they must run again to observe the stop.
+            renderer->resumeAll();
+            g.snapState.store(0);
+        }
+        gfxstream_va_release_texture_loader();
         if (renderer) {
             if (readback) renderer->setPostCallback(nullptr, nullptr, false, 0);
             // Closes every render channel from the host side (render threads
