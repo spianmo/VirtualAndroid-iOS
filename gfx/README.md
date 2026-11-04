@@ -99,7 +99,14 @@ void (*reg)(void)               = dlsym(h, "va_gfx_register_pipe_services");
 const char *(*renderer)(void)   = dlsym(h, "va_gfx_renderer_string");
 int  (*gles)(int *, int *)      = dlsym(h, "va_gfx_get_gles_version");   /* gfx addition */
 void (*teardown)(void)          = dlsym(h, "va_gfx_teardown");
+/* optional: guest physical -> host pointer for gralloc's DMA color buffer
+ * updates (goldfish_address_space memory); call before or after init */
+void (*dma)(void *(*)(uint64_t)) = dlsym(h, "va_gfx_set_dma_host_addr");
+if (dma) dma(goldfish_address_space_dma_host_addr);
 ```
+
+Without the DMA hook, `rcUpdateColorBufferDMA`/`rcReadColorBufferDMA` see no
+memory: camera frames and other CPU-written gralloc buffers stay black.
 
 Only these five symbols are exported (gfxstream/aemu are linked statically and
 hidden, so they cannot clash with QEMU's own `android_pipe_*`).

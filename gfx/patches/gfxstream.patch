@@ -569,6 +569,110 @@ index e9d9757..1708517 100644
  }
  
  std::unique_ptr<DisplaySurface> EmulationGl::createWindowSurface(
+diff --git a/host/gl/YUVConverter.cpp b/host/gl/YUVConverter.cpp
+index 3aa0cb7..2e38cba 100644
+--- a/host/gl/YUVConverter.cpp
++++ b/host/gl/YUVConverter.cpp
+@@ -16,6 +16,8 @@
+ 
+ #include "YUVConverter.h"
+ 
++#include <vector>
++
+ #include <assert.h>
+ #include <stdio.h>
+ #include <string>
+@@ -469,10 +471,54 @@ void YUVConverter::createYUVGLTex(GLenum textureUnit,
+     s_gles2.glActiveTexture(GL_TEXTURE0);
+ }
+ 
++// Reads back one plane texture (width x height texels, rows of
++// pixelsStride texels). GLES has no glGetTexImage (ANGLE only offers it as an
++// extension the translator does not dispatch to), so 8-bit planes are read
++// through a framebuffer as RGBA (the one glReadPixels format every GLES
++// implementation supports) and their channels picked out.
+ static void readYUVTex(GLuint tex, FrameworkFormat format, bool yuv420888ToNv21,
+-                       YUVPlane plane, void* pixels, uint32_t pixelsStride) {
++                       YUVPlane plane, void* pixels, uint32_t pixelsStride,
++                       uint32_t width, uint32_t height) {
+     YUV_DEBUG_LOG("format%d plane:%d pixels:%p", format, plane, pixels);
+ 
++    const GLenum pixelFormat = getGlPixelFormat(format, yuv420888ToNv21, plane);
++    const GLenum pixelType = getGlPixelType(format, yuv420888ToNv21,plane);
++    if (pixelType == GL_UNSIGNED_BYTE && (pixelFormat == GL_RED || pixelFormat == GL_RG)) {
++        const uint32_t channels = pixelFormat == GL_RG ? 2 : 1;
++        GLint prevFbo = 0;
++        s_gles2.glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
++        GLuint fbo = 0;
++        s_gles2.glGenFramebuffers(1, &fbo);
++        s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++        s_gles2.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
++        if (s_gles2.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
++            std::vector<uint8_t> rgba((size_t)width * height * 4);
++            GLint prevAlignment = 0, prevRowLength = 0;
++            s_gles2.glGetIntegerv(GL_PACK_ALIGNMENT, &prevAlignment);
++            s_gles2.glGetIntegerv(GL_PACK_ROW_LENGTH, &prevRowLength);
++            s_gles2.glPixelStorei(GL_PACK_ALIGNMENT, 4);
++            s_gles2.glPixelStorei(GL_PACK_ROW_LENGTH, 0);
++            s_gles2.glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
++            s_gles2.glPixelStorei(GL_PACK_ROW_LENGTH, prevRowLength);
++            s_gles2.glPixelStorei(GL_PACK_ALIGNMENT, prevAlignment);
++            uint8_t* dst = static_cast<uint8_t*>(pixels);
++            for (uint32_t row = 0; row < height; row++) {
++                const uint8_t* src = rgba.data() + (size_t)row * width * 4;
++                uint8_t* out = dst + (size_t)row * pixelsStride * channels;
++                for (uint32_t col = 0; col < width; col++) {
++                    for (uint32_t c = 0; c < channels; c++) {
++                        out[col * channels + c] = src[col * 4 + c];
++                    }
++                }
++            }
++        } else {
++            fprintf(stderr, "%s: plane %d of format %d is not readable\n", __func__, (int)plane, format);
++        }
++        s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
++        s_gles2.glDeleteFramebuffers(1, &fbo);
++        return;
++    }
++
+     GLuint prevTexture = 0;
+     s_gles2.glGetIntegerv(GL_TEXTURE_BINDING_2D, (GLint*)&prevTexture);
+     s_gles2.glBindTexture(GL_TEXTURE_2D, tex);
+@@ -483,8 +529,6 @@ static void readYUVTex(GLuint tex, FrameworkFormat format, bool yuv420888ToNv21,
+     s_gles2.glGetIntegerv(GL_PACK_ROW_LENGTH, &prevStride);
+     s_gles2.glPixelStorei(GL_PACK_ROW_LENGTH, pixelsStride);
+ 
+-    const GLenum pixelFormat = getGlPixelFormat(format, yuv420888ToNv21, plane);
+-    const GLenum pixelType = getGlPixelType(format, yuv420888ToNv21,plane);
+     if (s_gles2.glGetTexImage) {
+         s_gles2.glGetTexImage(GL_TEXTURE_2D, 0, pixelFormat, pixelType, pixels);
+     } else {
+@@ -949,10 +993,12 @@ void YUVConverter::readPixels(uint8_t* pixels, uint32_t pixels_size) {
+ 
+     if (isInterleaved(mFormat, mYuv420888ToNv21)) {
+         readYUVTex(mTextureV, mFormat, mYuv420888ToNv21, YUVPlane::UV, pixels + std::min(uOffsetBytes, vOffsetBytes),
+-                   uStridePixels);
++                   uStridePixels, uStridePixels, uHeight);
+     } else {
+-        readYUVTex(mTextureU, mFormat, mYuv420888ToNv21, YUVPlane::U, pixels + uOffsetBytes, uStridePixels);
+-        readYUVTex(mTextureV, mFormat, mYuv420888ToNv21, YUVPlane::V, pixels + vOffsetBytes, vStridePixels);
++        readYUVTex(mTextureU, mFormat, mYuv420888ToNv21, YUVPlane::U, pixels + uOffsetBytes, uStridePixels,
++                   uStridePixels, uHeight);
++        readYUVTex(mTextureV, mFormat, mYuv420888ToNv21, YUVPlane::V, pixels + vOffsetBytes, vStridePixels,
++                   vStridePixels, vHeight);
+     }
+ 
+     if (mFormat == FRAMEWORK_FORMAT_NV12 && mColorBufferFormat == FRAMEWORK_FORMAT_YUV_420_888) {
+@@ -960,7 +1006,8 @@ void YUVConverter::readPixels(uint8_t* pixels, uint32_t pixels_size) {
+     }
+ 
+     // Read the Y plane last because so that we can use it as a scratch space.
+-    readYUVTex(mTextureY, mFormat, mYuv420888ToNv21, YUVPlane::Y, pixels + yOffsetBytes, yStridePixels);
++    readYUVTex(mTextureY, mFormat, mYuv420888ToNv21, YUVPlane::Y, pixels + yOffsetBytes, yStridePixels,
++               yStridePixels, yHeight);
+ }
+ 
+ void YUVConverter::swapTextures(FrameworkFormat format, GLuint* textures, void* metadata) {
 diff --git a/host/gl/gl-host-common/meson.build b/host/gl/gl-host-common/meson.build
 index d102831..bcb7a46 100644
 --- a/host/gl/gl-host-common/meson.build

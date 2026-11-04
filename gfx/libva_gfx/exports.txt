@@ -5,3 +5,4 @@ _va_gfx_get_gles_version
 _va_gfx_teardown
 _va_gfx_snapshot_save
 _va_gfx_snapshot_load
+_va_gfx_set_dma_host_addr

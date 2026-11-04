@@ -82,10 +82,26 @@ typedef struct VaGfxEngineOps {
     size_t (*pipe_stream_get_buffer)(struct AndroidPipeStream *s, void *buf,
                                      size_t len);
 } VaGfxEngineOps;
+/*
+ * VaGfxEngineOps is copied by value and has no size/version field: never
+ * add members (an older engine's table is shorter). New engine hooks get
+ * their own optional entry points, like va_gfx_set_dma_host_addr().
+ */
 
 /* Call once, before the guest boots (after the android_pipe core is ready). */
 int va_gfx_init(const VaGfxConfig *config, const VaGfxEngineOps *engine,
                 VaGfxPresentFn present, void *opaque);
+
+/*
+ * (optional; the engine looks it up with dlsym and may call it before or
+ * after va_gfx_init) Guest physical address -> host pointer, or NULL. The
+ * guest's gralloc keeps CPU-visible buffer memory in goldfish_address_space
+ * host memory and updates/reads color buffers by DMA (rcUpdateColorBufferDMA
+ * and rcReadColorBufferDMA pass that memory's guest physical address).
+ * Called from renderer threads without the BQL. Not set = no DMA: those
+ * updates are dropped (camera frames and CPU-drawn buffers stay black).
+ */
+void va_gfx_set_dma_host_addr(void *(*dma_host_addr)(uint64_t guest_paddr));
 
 /* Registers the pipe services through engine->pipe_add_type(). */
 void va_gfx_register_pipe_services(void);

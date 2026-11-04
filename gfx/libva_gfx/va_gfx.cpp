@@ -80,6 +80,8 @@ struct State {
     VaGfxConfig cfg = {};
     std::string glesBackend;
     VaGfxEngineOps engine = {};
+    // va_gfx_set_dma_host_addr(): the engine's guest-physical -> host lookup.
+    std::atomic<void* (*)(uint64_t)> dmaHostAddr{nullptr};
     VaGfxPresentFn present = nullptr;
     void* presentOpaque = nullptr;
     gfxstream::RenderLibPtr renderLib;
@@ -1108,7 +1110,10 @@ void buildFeatures(gfxstream::host::FeatureSet* f, bool vulkan, bool sync) {
     VA_FEATURE(SystemBlob, false);
     VA_FEATURE(GuestVulkanOnly, false);
     VA_FEATURE(AsyncComposeSupport, false);
-    VA_FEATURE(Yuv420888ToNv21, true);
+    // Off as in the official emulator (gfxstreamFeature:Yuv420888ToNv21 = 0):
+    // the guest's gralloc lays YCbCr_420_888 out as I420 (planar), so treating
+    // it as NV21 garbles camera preview colours.
+    VA_FEATURE(Yuv420888ToNv21, false);
     VA_FEATURE(YuvCache, true);
     VA_FEATURE(Vulkan, vulkan);
     VA_FEATURE(VulkanBatchedDescriptorSetUpdate, false);
@@ -1131,6 +1136,11 @@ void onPost(void*, uint32_t displayId, int width, int height, int ydir, int, int
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+extern "C" __attribute__((visibility("default"))) void va_gfx_set_dma_host_addr(
+        void* (*dmaHostAddr)(uint64_t)) {
+    g.dmaHostAddr.store(dmaHostAddr, std::memory_order_release);
+}
 
 extern "C" __attribute__((visibility("default"))) int va_gfx_init(const VaGfxConfig* config,
                                                                   const VaGfxEngineOps* engine,
@@ -1192,8 +1202,13 @@ extern "C" __attribute__((visibility("default"))) int va_gfx_init(const VaGfxCon
                       syncRegisterTriggerWait, syncDeviceExists);
     lib.setLogger(android_opengl_logger_write);
     lib.setGLObjectCounter(android::base::GLObjectCounter::get());
+    // The guest's gralloc updates CPU buffers by DMA from goldfish_address_space
+    // host memory (rcUpdateColorBufferDMA); the engine translates the address.
     emugl_dma_ops dma = {
-        [](uint64_t) -> void* { return nullptr; },
+        [](uint64_t paddr) -> void* {
+            auto fn = g.dmaHostAddr.load(std::memory_order_acquire);
+            return fn ? fn(paddr) : nullptr;
+        },
         [](uint64_t) {},
     };
     lib.setDmaOps(dma);
