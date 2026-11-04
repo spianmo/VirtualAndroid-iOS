@@ -3,6 +3,7 @@
  *
  *   va_pipe_probe [-g] <pipe name> [send <text>] [sendz <text>]
  *                 [clipsend <text>] [read <seconds>] [clipread] [camreply]
+ *                 [camsave <file>]
  *
  * Opens the service the way the guest's libqemupipe does: AF_VSOCK to the
  * host (cid 2) port 5000, or /dev/goldfish_pipe with -g, then writes
@@ -10,7 +11,8 @@
  * queries need), "camreply" reads one camera reply ("%08x" size + payload)
  * and prints its status and size, "clipsend" writes a clipboard message
  * (LE32 length + text), "read" dumps whatever arrives for N seconds,
- * "clipread" waits for one clipboard message and prints it.
+ * "clipread" waits for one clipboard message and prints it, "camsave"
+ * writes one camera reply's payload (after "ok:") to a file.
  * Build with the NDK: host/macos/build.sh guest
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -133,6 +135,28 @@ int main(int argc, char **argv)
                        (uint8_t)buf[3], (uint8_t)buf[4], (uint8_t)buf[5],
                        (uint8_t)buf[6]);
             }
+            free(buf);
+        } else if (!strcmp(argv[i], "camsave") && i + 1 < argc) {
+            const char *path = argv[++i];
+            char hdr[9] = { 0 };
+            if (read_all(fd, hdr, 8)) {
+                fprintf(stderr, "camsave: EOF\n");
+                return 1;
+            }
+            size_t len = strtoul(hdr, NULL, 16);
+            char *buf = malloc(len + 1);
+            if (!buf || read_all(fd, buf, len)) {
+                fprintf(stderr, "camsave: short\n");
+                return 1;
+            }
+            FILE *f = fopen(path, "wb");
+            if (!f || len < 3 || fwrite(buf + 3, 1, len - 3, f) != len - 3) {
+                perror("camsave");
+                return 1;
+            }
+            fclose(f);
+            printf("camsave: %.2s, %zu payload bytes -> %s\n", buf, len - 3,
+                   path);
             free(buf);
         } else if (!strcmp(argv[i], "clipsend") && i + 1 < argc) {
             const char *t = argv[++i];

@@ -13,6 +13,11 @@
  *    VA_MAC_FAKE_CAMERA=1;
  *  - clipboard: guest copies are logged (and put on the macOS pasteboard
  *    with VA_MAC_PASTEBOARD=1);
+ *  - speaker: a sink that drains in real time like a DAC with a 250 ms
+ *    buffer, logs the level once per second and, with
+ *    VA_MAC_SPEAKER_WAV=/path.wav, records what it plays;
+ *  - microphone: a sine tone (VA_MAC_MIC_HZ, default 440 Hz) delivered in
+ *    real time;
  *  - control socket VA_MAC_CONTROL=/path.sock, one command per line:
  *      clip <text>                 host clipboard -> guest
  *      geo <lat> <lon> [<alt>]     move the fixed location
@@ -61,6 +66,20 @@ static bool s_fake_camera;
 static bool s_camera_on;
 static int s_cam_w, s_cam_h;
 static uint32_t s_cam_frame;
+
+/* Audio state (engine main loop only). */
+typedef struct AudioClock {
+    bool on;
+    int rate, channels;
+    int64_t start_ns;
+    uint64_t frames;          /* accepted (speaker) / delivered (mic) */
+} AudioClock;
+
+static AudioClock s_speaker, s_mic;
+static FILE *s_speaker_wav;
+static uint64_t s_speaker_logged;
+static int s_speaker_peak;
+static double s_mic_hz = 440;
 
 #define LOG(...) plat_log(1, __VA_ARGS__)
 static void plat_log(int level, const char *fmt, ...)
@@ -294,6 +313,140 @@ static void cb_vibrate(void *o, uint32_t ms)
     LOG("vibrate %u ms", ms);
 }
 
+/* ---- audio ---- */
+
+static uint64_t audio_clock_due(const AudioClock *c, int64_t ahead_ms)
+{
+    int64_t ns = now_ns() - c->start_ns + ahead_ms * 1000000;
+
+    return ns > 0 ? (uint64_t)((double)ns * c->rate / 1e9) : 0;
+}
+
+static void wav_header(FILE *f, int rate, int channels, uint32_t data_bytes)
+{
+    uint8_t h[44];
+    uint32_t v;
+
+    memcpy(h, "RIFF", 4);
+    v = 36 + data_bytes;
+    memcpy(h + 4, &v, 4);
+    memcpy(h + 8, "WAVEfmt ", 8);
+    v = 16;
+    memcpy(h + 16, &v, 4);
+    uint16_t pcm = 1, ch = (uint16_t)channels, bits = 16;
+    uint16_t align = (uint16_t)(channels * 2);
+    uint32_t byte_rate = (uint32_t)(rate * channels * 2), r = (uint32_t)rate;
+    memcpy(h + 20, &pcm, 2);
+    memcpy(h + 22, &ch, 2);
+    memcpy(h + 24, &r, 4);
+    memcpy(h + 28, &byte_rate, 4);
+    memcpy(h + 32, &align, 2);
+    memcpy(h + 34, &bits, 2);
+    memcpy(h + 36, "data", 4);
+    memcpy(h + 40, &data_bytes, 4);
+    fseek(f, 0, SEEK_SET);
+    fwrite(h, 1, sizeof(h), f);
+    fseek(f, 0, SEEK_END);
+}
+
+static bool cb_speaker_start(void *o, int rate, int channels)
+{
+    (void)o;
+    const char *wav = getenv("VA_MAC_SPEAKER_WAV");
+
+    s_speaker = (AudioClock){ true, rate, channels, now_ns(), 0 };
+    s_speaker_logged = 0;
+    s_speaker_peak = 0;
+    if (wav && *wav && !s_speaker_wav) {
+        s_speaker_wav = fopen(wav, "w+b");
+        if (s_speaker_wav) {
+            wav_header(s_speaker_wav, rate, channels, 0);
+        }
+    }
+    LOG("speaker start %d Hz x%d", rate, channels);
+    return true;
+}
+
+static void cb_speaker_stop(void *o)
+{
+    (void)o;
+    s_speaker.on = false;
+    if (s_speaker_wav) {
+        long size = ftell(s_speaker_wav);
+        wav_header(s_speaker_wav, s_speaker.rate, s_speaker.channels,
+                   size > 44 ? (uint32_t)(size - 44) : 0);
+        fclose(s_speaker_wav);
+        s_speaker_wav = NULL;
+    }
+    LOG("speaker stop after %llu frames", (unsigned long long)s_speaker.frames);
+}
+
+static size_t cb_speaker_write(void *o, const int16_t *src, size_t frames)
+{
+    (void)o;
+    if (!s_speaker.on) {
+        return 0;
+    }
+    uint64_t room = audio_clock_due(&s_speaker, 250);
+    size_t n = room > s_speaker.frames ? room - s_speaker.frames : 0;
+    n = n < frames ? n : frames;
+    for (size_t i = 0; i < n * (size_t)s_speaker.channels; i++) {
+        int a = abs(src[i]);
+        s_speaker_peak = a > s_speaker_peak ? a : s_speaker_peak;
+    }
+    if (s_speaker_wav && n) {
+        fwrite(src, (size_t)s_speaker.channels * 2, n, s_speaker_wav);
+    }
+    s_speaker.frames += n;
+    if (s_speaker.frames - s_speaker_logged >= (uint64_t)s_speaker.rate) {
+        LOG("speaker: %llu frames played, peak %d",
+            (unsigned long long)s_speaker.frames, s_speaker_peak);
+        s_speaker_logged = s_speaker.frames;
+        s_speaker_peak = 0;
+    }
+    return n;
+}
+
+static bool cb_mic_start(void *o, int rate, int channels)
+{
+    (void)o;
+    const char *hz = getenv("VA_MAC_MIC_HZ");
+
+    if (hz && *hz) {
+        s_mic_hz = atof(hz);
+    }
+    s_mic = (AudioClock){ true, rate, channels, now_ns(), 0 };
+    LOG("mic start %d Hz x%d (%.0f Hz tone)", rate, channels, s_mic_hz);
+    return true;
+}
+
+static void cb_mic_stop(void *o)
+{
+    (void)o;
+    s_mic.on = false;
+    LOG("mic stop after %llu frames", (unsigned long long)s_mic.frames);
+}
+
+static size_t cb_mic_read(void *o, int16_t *dst, size_t frames)
+{
+    (void)o;
+    if (!s_mic.on) {
+        return 0;
+    }
+    uint64_t due = audio_clock_due(&s_mic, 0);
+    size_t n = due > s_mic.frames ? due - s_mic.frames : 0;
+    n = n < frames ? n : frames;
+    for (size_t f = 0; f < n; f++) {
+        double t = (double)(s_mic.frames + f) / s_mic.rate;
+        int16_t v = (int16_t)(sin(2 * M_PI * s_mic_hz * t) * 8000);
+        for (int c = 0; c < s_mic.channels; c++) {
+            dst[f * (size_t)s_mic.channels + (size_t)c] = v;
+        }
+    }
+    s_mic.frames += n;
+    return n;
+}
+
 /* ---- sensor / location ticker ---- */
 
 static void *ticker_main(void *arg)
@@ -479,6 +632,12 @@ static VaHostCallbacks s_cb = {
     .camera_stop = cb_camera_stop,
     .camera_read_frame = cb_camera_read_frame,
     .vibrate = cb_vibrate,
+    .mic_start = cb_mic_start,
+    .mic_stop = cb_mic_stop,
+    .mic_read = cb_mic_read,
+    .speaker_start = cb_speaker_start,
+    .speaker_stop = cb_speaker_stop,
+    .speaker_write = cb_speaker_write,
 };
 
 static void set_value(VaSensorType t, float a, float b, float c, int n)
