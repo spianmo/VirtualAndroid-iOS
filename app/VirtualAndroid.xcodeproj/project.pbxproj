@@ -71,7 +71,7 @@
 		61BD34C5D6F3EF60160E74D7 /* AudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioBridge.swift; sourceTree = "<group>"; };
 		6CE6491D7ADE3A78CC288A40 /* VirtualAndroid-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "VirtualAndroid-Bridging-Header.h"; sourceTree = "<group>"; };
 		6DFADDEFEAABAAE2B0AE4F57 /* VirtualAndroid-Debug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "VirtualAndroid-Debug.entitlements"; sourceTree = "<group>"; };
-		6EB1629B36469CCDE4BF656F /* VirtualAndroid.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VirtualAndroid.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6EB1629B36469CCDE4BF656F /* VirtualAndroid.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VirtualAndroid.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6F1531474E45B03BE54E5CE7 /* BootConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BootConfig.swift; sourceTree = "<group>"; };
 		71AAECD13BE1465A01A256FC /* DisplayContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayContainer.swift; sourceTree = "<group>"; };
 		7611DD2037B250075CCA2648 /* BatteryBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryBridge.swift; sourceTree = "<group>"; };
@@ -286,7 +286,6 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					7397AF641FC28E2A38BDE5D5 = {
-						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
 					A3C1AEC0A4E83D4EF66B8603 = {
@@ -404,9 +403,12 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = T467YY23U8;
 				ENABLE_BITCODE = NO;
-				GCC_PREPROCESSOR_DEFINITIONS = "$(inherited) VA_APP=1";
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"VA_APP=1",
+				);
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/../host/include",
@@ -414,7 +416,10 @@
 					"$(SRCROOT)/VirtualAndroid/Support",
 				);
 				INFOPLIST_FILE = VirtualAndroid/Support/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.virtualandroid.app;
 				PRODUCT_NAME = VirtualAndroid;
@@ -581,9 +586,12 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = T467YY23U8;
 				ENABLE_BITCODE = NO;
-				GCC_PREPROCESSOR_DEFINITIONS = "$(inherited) VA_APP=1";
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"VA_APP=1",
+				);
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/../host/include",
@@ -591,7 +599,10 @@
 					"$(SRCROOT)/VirtualAndroid/Support",
 				);
 				INFOPLIST_FILE = VirtualAndroid/Support/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.virtualandroid.app;
 				PRODUCT_NAME = VirtualAndroid;
