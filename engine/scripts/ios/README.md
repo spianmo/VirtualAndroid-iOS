@@ -17,9 +17,13 @@ $S/build_deps.sh -p ios
 $S/build_qemu.sh -p ios_simulator -b tcg  -s engine/qemu-ios   # JIT
 $S/build_qemu.sh -p ios           -b tcti -s engine/qemu-ios   # no JIT
 $S/build_qemu.sh -p ios_simulator -b tcti -s engine/qemu-ios   # optional: TCTI in the simulator
-# 3. xcframeworks (device slice = tcti, simulator slice = tcg by default)
+# 3. AOT cache for a TCTI slice (docs/AOT.md "iOS integration"); rerun after
+#    every TCTI rebuild, the cache is bound to that exact binary
+$S/build_aot.sh -p ios -c cap.txt --prof prof.tsv           # -> qemu-tcti/Frameworks/va_aot.framework
+# 4. xcframeworks (device slice = tcti, simulator slice = tcg by default;
+#    va_aot.xcframework only for TCTI slices it is bound to)
 $S/make_xcframeworks.sh [--sim-backend tcg|tcti] [--device-backend tcti|tcg]
-# 4. headless boot test in the simulator (no app); default machine ranchu with
+# 5. headless boot test in the simulator (no app); default machine ranchu with
 #    va-vsock-pci adb bridge and gfx/build-ios-sim/dist libva_gfx
 $S/run_sim.sh -b tcg --fresh --keep --screenshot-dir engine/build-ios/run/shots
 adb connect 127.0.0.1:5590 && adb -s 127.0.0.1:5590 shell getprop sys.boot_completed

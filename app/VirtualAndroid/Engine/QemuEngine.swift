@@ -70,6 +70,16 @@ final class QemuEngine: VMEngine {
         return nil
     }
 
+    /// AOT translation cache for the TCTI build (docs/AOT.md): native code for
+    /// the hottest guest TBs, bound to the QEMU slice it was embedded with.
+    /// QEMU rejects a table that does not match its build and runs plain TCTI.
+    /// `-VAAOT NO` runs plain TCTI anyway (A/B timing).
+    static var aotLibraryPath: String? {
+        let d = UserDefaults.standard
+        if d.object(forKey: "VAAOT") != nil && !d.bool(forKey: "VAAOT") { return nil }
+        return frameworkBinary("va_aot")
+    }
+
     static var isAvailable: Bool { selectFramework() != nil }
 
     static var angleLibraryPath: String? {
@@ -213,6 +223,13 @@ final class QemuEngine: VMEngine {
 
         var env: [String: String] = [:]
         if let dump = config.dumpFramesDir { env["VA_DUMP_FRAMES"] = dump }
+        if accel == .tcti {
+            if let aot = Self.aotLibraryPath {
+                env["QEMU_AOT_LIB"] = aot
+            } else {
+                log(1, "TCTI without the AOT cache (va_aot.framework not embedded, or -VAAOT NO)")
+            }
+        }
 
         if config.restoreStateFile == nil {
             progress = BootProgressTracker(serial: storage.serialLog, logcat: storage.logcatLog) { [weak self] f, msg in

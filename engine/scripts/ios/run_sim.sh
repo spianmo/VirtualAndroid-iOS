@@ -62,7 +62,10 @@ if [[ -z $UDID ]]; then
   fi
 fi
 if ! xcrun simctl list devices booted | grep -q $UDID; then
-  xcrun simctl boot $UDID
+  # simctl boot copies SIMCTL_CHILD_* into the device's launchd environment, where
+  # every later spawn would inherit it (e.g. a QEMU_AOT_CAPTURE that truncates the
+  # capture of an earlier run): boot without them, they are meant for the spawn only
+  ( for v in ${(k)parameters[(I)SIMCTL_CHILD_*]}; do unset $v; done; xcrun simctl boot $UDID )
   xcrun simctl bootstatus $UDID -b >/dev/null
 fi
 
@@ -107,7 +110,7 @@ ARGS=(
   -M $MACHINE -accel tcg,thread=multi,tb-size=1024 -cpu cortex-a76 -smp 4 -m 2048 -nodefaults -display none
   -serial file:$RUN/serial.log -monitor unix:$RUN/monitor.sock,server,nowait
   -kernel $IMG/kernel-ranchu -initrd $RUN/initrd
-  -append "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 printk.devkmsg=on bootconfig"
+  -append "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig"
   -drive index=0,id=vendor,if=none,file=$IMG/vendor.img,read-only=on,format=raw -device virtio-blk-device,drive=vendor
   -drive index=1,id=encrypt,if=none,file=$RUN/encryptionkey.img,format=raw -device virtio-blk-device,drive=encrypt
   -drive index=2,id=userdata,if=none,file=$RUN/userdata.img,format=raw -device virtio-blk-device,drive=userdata

@@ -5,8 +5,10 @@
 #
 # Inputs:  engine/build-ios/{ios,ios_simulator}-arm64/Frameworks/*.framework  (deps)
 #          engine/build-ios/<platform>-arm64/qemu-<backend>/Frameworks/qemu-aarch64-softmmu.framework
+#          engine/build-ios/<platform>-arm64/qemu-tcti/Frameworks/va_aot.framework (build_aot.sh)
 # Output:  engine/build-ios/xcframeworks/<name>.xcframework
-#          (a platform that has not been built is simply left out)
+#          (a platform that has not been built is simply left out; va_aot only
+#          for TCTI slices it is bound to)
 set -e
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 OUT="$ROOT/engine/build-ios"
@@ -68,3 +70,28 @@ cat > "$XCF/qemu-backends.txt" <<EOF
 ios-arm64           : $DEV_BACKEND
 ios-arm64-simulator : $SIM_BACKEND
 EOF
+
+# AOT cache (build_aot.sh): only next to a TCTI QEMU slice, and only when it
+# is bound to that exact QEMU binary (else QEMU would reject it at load).
+aot_fw () {  # $1 platform dir, $2 backend
+    [ "$2" = tcti ] || return 0
+    q="$1/qemu-tcti"
+    fw="$q/Frameworks/va_aot.framework"
+    [ -d "$fw" ] || return 0
+    if [ "$(shasum "$q/Frameworks/qemu-aarch64-softmmu.framework/qemu-aarch64-softmmu" | awk '{print $1}')" \
+         != "$(cat "$q/aot/bound-qemu.sha1" 2>/dev/null)" ]; then
+        echo "warning: $fw is bound to an older QEMU build, left out (run build_aot.sh again)" >&2
+        return 0
+    fi
+    echo "$fw"
+}
+args=()
+d="$(aot_fw "$DEV" "$DEV_BACKEND")"
+s="$(aot_fw "$SIM" "$SIM_BACKEND")"
+[ -n "$d" ] && args+=(-framework "$d")
+[ -n "$s" ] && args+=(-framework "$s")
+rm -rf "$XCF/va_aot.xcframework"
+if [ ${#args[@]} -gt 0 ]; then
+    xcodebuild -create-xcframework "${args[@]}" -output "$XCF/va_aot.xcframework" >/dev/null
+    echo "va_aot.xcframework: $(ls "$XCF/va_aot.xcframework" | grep -v Info.plist | tr '\n' ' ')"
+fi
