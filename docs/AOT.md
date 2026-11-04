@@ -324,8 +324,10 @@ Debugging aids:
 3. Specialize hot helpers by inlining them: flag computations, `vfp_*`,
    crypto. That means compiling the generated code together with QEMU's
    helper sources, which requires a static link.
-4. iOS integration: `-DAOT_STATIC`, cross-compile, link into the QEMU
-   framework (engine/qemu-ios), and measure on a device.
+4. iOS integration: done as a separate `va_aot.framework` loaded through
+   `QEMU_AOT_LIB` (see "iOS integration" below); TCTI+AOT reaches
+   `boot_completed` in the simulator and on an iPhone. Left: a plain-TCTI
+   device run to `boot_completed` for the A/B, and a stricter binding check.
 5. A larger profile corpus (launcher, Settings, a few apps) plus the full-AOT
    ART configuration, then pick the cache size by the coverage curve.
 
@@ -381,6 +383,96 @@ Debugging aids:
   - A reference run could leave its TB through a slot re-chained by another
     vCPU and nest into a second verification.
 
+## iOS integration (ranchu, 2026-11-04)
+
+The runtime is merged into the iOS engine source (engine/qemu-ios, branch
+`ios` at 231f0b92c: master 0e17cd59b + `aot` up to a1a9daff4, including the
+TCTI fix 08b6a2cac, plus 55bb17924, which keeps the translation-time
+counters always on and prints
+`aot: translated N TBs, … table hits, … mismatches, … native` at exit when a
+table is loaded). The cache ships as its own framework, `va_aot.framework`,
+next to the TCTI QEMU slice it is bound to; the app sets `QEMU_AOT_LIB` to it
+under TCTI (`-VAAOT NO` turns it off for A/B runs).
+
+Pipeline (each step reruns after an engine change):
+
+1. Profile on macOS with the JIT build and tbprof, ranchu, fresh userdata,
+   then a scripted UI session (`tools/aot/workload.py`: Settings and three of
+   its pages, app drawer, notification shade, nine AOSP apps):
+   `tools/run-macos.sh --fresh --tcg --machine ranchu … -- -plugin libtbprof.dylib,out=prof.tsv`
+   plus `workload.py --serial 127.0.0.1:PORT --quit-monitor RUN/monitor.sock`.
+   `analyze-prof.py --hot-out hot.txt --hot-n 200000`.
+2. Capture with the simulator TCTI build (same source and configuration as
+   the device slice): `SIMCTL_CHILD_QEMU_AOT_CAPTURE=cap.txt
+   SIMCTL_CHILD_QEMU_AOT_HOT=hot.txt engine/scripts/ios/run_sim.sh -b tcti --fresh`.
+3. `engine/scripts/ios/build_aot.sh -p ios_simulator|ios -c cap.txt --prof prof.tsv`
+   (tcg2c.py with the platform's clang, sysroot and target, helpers bound to
+   that platform's QEMU binary with nm), then `make_xcframeworks.sh`, which
+   adds `va_aot.xcframework` only for TCTI slices whose binary matches
+   `qemu-tcti/aot/bound-qemu.sha1`.
+
+Profile (prof-r1: boot to `boot_completed` plus the UI session, JIT, 2.09 M
+distinct TBs, 3.6e10 executions): the top 10k / 50k / 100k / 200k TBs cover
+74.2 / 93.1 / 97.2 / 99.1 % of executions. App use spreads execution much
+more than the boot-only profile of the virt board did (top 10k: 81.1 %).
+
+Bugs found while bringing it up on ranchu (all fixed):
+- TCTI `cmp_vec` LT/LE and LTU/LEU picked the wrong instruction
+  (08b6a2cac on `aot`): NEON `CMLT #0` / `CMLE #0` were wrong on zero lanes,
+  and zygote died in every preload (ICU `MissingResourceException`). The
+  differential fuzzer in `tcg/aarch64-tcti/tests` (a1a9daff4, TCTI vs JIT,
+  random integer/memory/atomic/NEON streams) found nothing else.
+- tcg2c translated `shlv_vec` as a generic left shift. TCTI's `shlv` gadget is
+  `USHL` (signed per-lane count) and its `shrv`/`rotlv`/`rotrv` expansions use
+  negative counts, so register right shifts came out as left shifts. Under
+  TCTI+AOT zygote then hung right after `Using memfd for future sealing`.
+  Now `aot_ushl{8,16,32,64}` in `aot_rt.h` (checked against the hardware
+  `USHL`/`SSHL` for counts -70..70 on every lane size).
+- Not a CPU bug: under TCTI apexd timed out waiting for new
+  `/dev/block/loopN` nodes, `com.android.media` stayed inactive and zygote
+  preload died with `NoClassDefFoundError` (SystemServiceRegistry). The
+  kernel command line now has `loop.max_loop=64` (a50c9f3, run_sim.sh), and
+  the initrd sets `ro.hw_timeout_multiplier=5` so the system_server watchdog
+  tolerates TCTI speed (b5b73bf).
+
+Final cache: 211,716 TBs from three TCTI captures (kernel to zygote preload;
+boot to `boot_completed`; boot plus the UI session), 129 helpers, 97 MB on
+the device slice.
+
+Simulator, fresh userdata, host wall clock, iPhone 17 Pro simulator on M2
+Max, no other VM running:
+
+| milestone | TCTI | TCTI+AOT |
+|---|---|---|
+| init second stage | 20.7 s | 9.3 s |
+| start `zygote` | 418.9 s | 175.8 s (2.4x) |
+| start `surfaceflinger` | 434.4 s | 192.7 s |
+| start `bootanim` | 452.9 s | 204.0 s |
+| `sys.boot_completed=1` | 1061.0 s | **463.1 s (2.3x)** |
+| zygote `BeginPreload` | 7.6 s | 2.8 s |
+
+Both runs: zygote deaths 0, ANRs 0, watchdog kills 0. TCTI+AOT: 2,100,256
+TBs translated, 384,855 table hits (18 %), 0 fingerprint or shape
+mismatches.
+
+Device (iPhone 17 Pro Max, A19 Pro, iOS 27.2, TCTI+AOT, same slices, fresh
+userdata, guest seconds, measured by the device session): Run /init 1.45,
+init second stage 6.3, zygote 154.2, surfaceflinger 162.4, bootanim 175.1,
+`boot_completed` 433.2; Launcher3 displayed about 2 min later; Settings and
+Camera open (`docs/iphone-home-screen.png`). No plain-TCTI run to `boot_completed` on the device yet (an
+earlier one with the ICU bug reached zygote at 357 s).
+
+Remaining:
+- Only 18 % of translated TBs hit the table after boot; the rest of the time
+  is TCTI gadgets. A larger corpus (more apps, longer sessions) and the
+  full-AOT ART configuration (step 5 above) are the next levers.
+- A cache is only checked against the layout and the 8 slow-path helper
+  offsets. A stale `va_aot.framework` left in an app bundle next to a rebuilt
+  QEMU (the embed script copies, it never deletes) could call the wrong
+  helpers. `make_xcframeworks.sh` pairs by binary hash, but the app should
+  also check the binding, for example the full helper offset table or a QEMU
+  build id.
+
 ## Files
 
 - engine/qemu-aot (branch `aot`):
@@ -395,3 +487,6 @@ Debugging aids:
   - `analyze-prof.py`
   - `tcg2c.py`, `aot_rt.h`: generator and runtime header
   - `try-boot.sh`, `bisect.py`
+  - `workload.py`: scripted UI session over adb (profile, capture, timing)
+- engine/scripts/ios/build_aot.sh: cross-compiles the cache into
+  `va_aot.framework` for one platform (iOS integration above)
