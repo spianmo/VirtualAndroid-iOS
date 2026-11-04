@@ -61,3 +61,60 @@
 
 **App**：生命周期——后台挂起（beginBackgroundTask）、前台 `cont`、冷启动时有效快照就 `-incoming`，否则冷启动；
 首次开机完成后立即建快照；启动时先显示 `last-frame.png`；版本不符自动作废。模拟器实测启动到可交互耗时。
+
+## 引擎侧实现与实测（board，2026-11-04）
+**用法（macOS）**：`tools/run-macos.sh --machine ranchu --snapshot --name N --adb-port P`
+- 如果有干净的快照，就自动 `-incoming defer`，再由 `tools/snapshot.py restore` 恢复，日志在 `engine/run/N/restore.log`。
+- 否则丢弃快照并冷启动。
+- 挂起：`python3 -I tools/snapshot.py suspend --run engine/run/N [--quit]`。
+- 另有 `status`、`check`、`resume`、`discard` 子命令。
+- QMP 固定在 `engine/run/N/qmp.sock`。
+
+**快照目录**：`snapshot/` 下的文件：
+- `ram.img`：客户机内存。
+- `as.img`：goldfish_address_space 的宿主内存块，8 GiB 稀疏文件，实际只占已分配的块。
+- `gfx/`：渲染器的大块数据。
+- `state.bin`、`manifest.json`。
+- `launch.json`：run-macos.sh 写入，记录 qemu、渲染器和镜像文件在启动时的身份（大小+修改时间），以及冷启动用的 argv。
+- `last-frame.png`。
+
+**manifest**：
+- 有 `engine`、`gfx`、`image`、`argv_hash`、`clean`、`saved_at`、`state_bytes`、`suspend_ms` 字段。
+- 只要有一项和本次启动不一致，快照就作废；实测替换 qemu 二进制后，快照被判为 "engine changed"。
+- `clean` 只在挂起完成到客户机再次运行之间为 true；restore 和 resume 在 `cont` 之前先把它置为 false。
+
+**机器属性**：`-machine ranchu,snapshot-dir=DIR[,time-sync=on|off]`
+
+**迁移段与恢复规则**：
+- `va-gfx` 段的优先级高于 pipe 和 goldfish_sync。段内格式是"魔数 + 长度 + 渲染器写入的字节"，渲染器读回的字节数必须和写入的完全一致。
+- 加载的 libva_gfx 没有 `va_gfx_snapshot_*`，或者没设 `snapshot-dir`，都会注册迁移 blocker，不会产出缺 GPU 状态的快照。
+- `VA_GFX_SNAPSHOT_STUB=1` 是**临时**开关：写一个空的 va-gfx 段，恢复后图形 pipe 被强制关闭。
+- `goldfish_address_space`：加载时只建块列表，内存区在 VM 开始运行时才创建（迁移协程里不能新建 RAM 块）。cpr-reboot 模式下块数据留在 as.img 里，不进流。
+- vsock：pipe-port 连接（剪贴板等）随服务状态一起保存和恢复；宿主 TCP 连接（adb）在恢复后逐个发 RST，不再发 TRANSPORT_RESET。
+- 平台事件：VM 停着的时候，按键和触摸直接丢弃；电池、传感器、定位、剪贴板事件排队，等 VM 运行后再处理。
+- 恢复后在新进程里重新调用平台回调：`sensor_set_enabled`、`location_set_enabled`，正在取流的相机会调 `camera_start`。
+- boot-completed 状态存在 `va-host` 段里，恢复后会再报一次 `VA_GUEST_BOOT_COMPLETED`。
+
+**客户机时间**：
+- 官方模拟器在 quickboot 加载后，通过 modem 模拟器发一条 NITZ 来校时。
+- 我们目前在恢复后（或暂停 ≥1 s 后）向引擎自有的控制台输入 `su 0 toybox date -u @<now>`（`hw/android/guest_time.c`）。
+- 前提：serial 0 必须是 ringbuf chardev，并且能探测到 shell 提示符，否则跳过。
+- App 要传 `-chardev ringbuf,id=vaconsole,size=65536 -serial chardev:vaconsole`。
+- **以后**应改成一个很小的 NITZ 式或专用时间 pipe 服务，不再借用控制台。
+
+**实测（macOS HVF，M2 Max，ranchu，`VA_GFX_SNAPSHOT_STUB=1`，即不含 GPU 状态）**：
+| 项目 | 结果 |
+|---|---|
+| 冷启动到 `sys.boot_completed=1` | 8–15 s |
+| 挂起（stop + migrate，cpr-reboot） | 31–103 ms，state.bin 0.7 MB（原先 94 MB 里多出来的那部分是 address_space 块数据，已移到 as.img） |
+| 恢复：进程启动到 QMP 可用 | 200–270 ms |
+| 恢复：加载 + 继续运行 | 21–49 ms（启动后 228–318 ms 客户机就在跑） |
+| 恢复：adb `getprop sys.boot_completed`=1 | 启动后 441 ms |
+| 连续 3 轮挂起/恢复 | 每轮都恢复成功；pipe 服务恢复情况：qemud 全部 restored=1，QemuMiscPipe restored=1，图形 pipe 因为是 stub 所以 restored=0 |
+| 恢复后 2 分钟 | 没有 watchdog；`am start` Settings 返回 ok，但它的 RenderThread 因 "no surface" abort（stub 没有 GPU 状态，属预期） |
+| 运行中被杀 | 快照被拒（not clean），冷启动，ext4 日志恢复正常 |
+| 客户机时间 | 恢复后客户机 `date +%s` 和宿主一致 |
+
+**未完成**：
+- 带真实 GPU 状态的端到端验证。gfx 当前的 `va_gfx_snapshot_save` 在 `glGetTexImage` 上段错误（没有 GL context，而且调用的是系统 OpenGL.framework 里的函数）。
+- 恢复后的首帧时间，要等 GPU 状态能用之后才能测。
