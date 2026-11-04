@@ -270,15 +270,31 @@ def cmd_resume(a):
     return 0
 
 
-def adb_boot_completed(port, timeout=1.5):
-    try:
-        out = subprocess.run(
-            ["adb", "-s", "127.0.0.1:%d" % port, "shell",
-             "getprop sys.boot_completed"],
-            capture_output=True, text=True, timeout=timeout).stdout
-        return out.strip() == "1"
-    except (subprocess.TimeoutExpired, OSError):
-        return False
+def adb(args, timeout=3.0):
+    """Runs adb with output in a temp file: an adb that spawns the adb
+    server would keep pipes open (and subprocess waiting) forever."""
+    import tempfile
+    with tempfile.TemporaryFile() as out:
+        try:
+            p = subprocess.Popen(["adb"] + args, stdin=subprocess.DEVNULL,
+                                 stdout=out, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+        except OSError:
+            return ""
+        try:
+            p.wait(timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+            return ""
+        out.seek(0)
+        return out.read().decode(errors="replace")
+
+
+def adb_boot_completed(port):
+    serial = "127.0.0.1:%d" % port
+    return adb(["-s", serial, "shell", "getprop sys.boot_completed"],
+               1.5).strip() == "1"
 
 
 def cmd_restore(a):
@@ -313,15 +329,15 @@ def cmd_restore(a):
                 break
             time.sleep(0.02)
     if a.adb_port:
-        subprocess.run(["adb", "connect", "127.0.0.1:%d" % a.adb_port],
-                       capture_output=True, timeout=10)
+        serial = "127.0.0.1:%d" % a.adb_port
+        # The adb server may still hold the dead connection of the old process.
+        adb(["disconnect", serial])
         while now() < deadline:
+            adb(["connect", serial])
             if adb_boot_completed(a.adb_port):
                 print("adb sys.boot_completed=1 at %.0f ms after launch" %
                       ((now() - mono0) * 1000), flush=True)
                 break
-            subprocess.run(["adb", "connect", "127.0.0.1:%d" % a.adb_port],
-                           capture_output=True, timeout=10)
             time.sleep(0.05)
     return 0
 

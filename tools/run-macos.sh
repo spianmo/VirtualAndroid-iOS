@@ -11,7 +11,8 @@
 # every pipe service the guest opens is logged to qemu.out. --trace adds more QEMU trace
 # event patterns (e.g. --trace 'goldfish_*'). --console makes the kernel console (where
 # the image runs a root-capable 'console' shell) a unix socket, $RUN/console.sock, still
-# logged to serial.log; talk to it with e.g. `nc -U engine/run/<name>/console.sock`.
+# logged to serial.log; talk to it with e.g. `nc -U engine/run/<name>/console.sock` (the
+# engine then leaves the console alone: no guest clock sync after a restore).
 # ranchu loads the host renderer from --gfx-lib (default gfx/build-macos/dist/libva_gfx.dylib
 # if built; "none" = no graphics). --screenshot-dir DIR writes guest frames to DIR/latest.png
 # (+ the first few as frame-N.png; VA_DUMP_EVERY=N sets the interval, default 30 frames).
@@ -77,7 +78,9 @@ if [[ ! -f $RUN/initrd || "$(cat $RUN/initrd.params 2>/dev/null)" != "$INITRD_ST
   print -r -- "$INITRD_STAMP" > $RUN/initrd.params
 fi
 rm -f $RUN/serial.log $RUN/logcat.log $RUN/hvc0.log $RUN/console.sock
-SERIAL_OPT=(-serial file:$RUN/serial.log)
+# Engine-owned console (ringbuf): the engine may type on it (guest clock sync after a
+# snapshot restore, hw/android/guest_time.c); everything is still logged to serial.log.
+SERIAL_OPT=(-chardev ringbuf,id=vaconsole,size=65536,logfile=$RUN/serial.log -serial chardev:vaconsole)
 if (( CONSOLE )); then
   SERIAL_OPT=(-chardev socket,id=ser0,path=$RUN/console.sock,server=on,wait=off,logfile=$RUN/serial.log
               -serial chardev:ser0)
