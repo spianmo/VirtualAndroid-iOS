@@ -320,25 +320,32 @@ def cmd_restore(a):
           "%.0f ms after launch" % ((t_qmp - mono0) * 1000,
                                     (t_loaded - t_qmp) * 1000,
                                     (t_run - mono0) * 1000), flush=True)
-    if a.frame_dir:
-        frame = os.path.join(a.frame_dir, "latest.png")
-        while now() < deadline:
+    # Wait for a fresh frame and for adb at the same time.
+    frame = os.path.join(a.frame_dir, "latest.png") if a.frame_dir else None
+    frame_deadline = min(deadline, now() + 10)
+    want_adb = bool(a.adb_port)
+    serial = "127.0.0.1:%d" % a.adb_port if want_adb else None
+    if want_adb:
+        # The adb server may still hold the dead connection of the old process.
+        adb(["disconnect", serial], 1.0)
+    while (frame or want_adb) and now() < deadline:
+        if frame:
             if os.path.exists(frame) and os.path.getmtime(frame) > t0:
                 print("first new frame at %.0f ms after launch" %
                       ((now() - mono0) * 1000), flush=True)
-                break
-            time.sleep(0.02)
-    if a.adb_port:
-        serial = "127.0.0.1:%d" % a.adb_port
-        # The adb server may still hold the dead connection of the old process.
-        adb(["disconnect", serial])
-        while now() < deadline:
-            adb(["connect", serial])
-            if adb_boot_completed(a.adb_port):
-                print("adb sys.boot_completed=1 at %.0f ms after launch" %
-                      ((now() - mono0) * 1000), flush=True)
-                break
-            time.sleep(0.05)
+                frame = None
+            elif now() > frame_deadline:
+                # Without GPU state (stub) no frame may come.
+                print("no new frame within 10 s", flush=True)
+                frame = None
+        if want_adb and "connected" in adb(["connect", serial], 1.0) and \
+                adb_boot_completed(a.adb_port):
+            print("adb sys.boot_completed=1 at %.0f ms after launch" %
+                  ((now() - mono0) * 1000), flush=True)
+            want_adb = False
+        time.sleep(0.02)
+    if want_adb:
+        print("adb not ready within the timeout", flush=True)
     return 0
 
 
