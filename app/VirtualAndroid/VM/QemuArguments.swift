@@ -69,6 +69,15 @@ struct QemuArgumentBuilder {
     var adbHostPort: Int?
     var vsockGuestCID = 77
     var vsockPipePort = 5000
+    /// ranchu: Wi-Fi access point for the guest's wlan0 (`va-wifi-pci`, on its
+    /// own slirp network) and the Bluetooth controller on the virtio-serial
+    /// port "bluetooth" (`va-bluetooth`), as tools/run-macos.sh. Off for an
+    /// engine built before these devices existed (QemuEngine probes it).
+    var wifi = true
+    var bluetooth = true
+    /// ranchu: virtio-sound on the engine's "va" audio backend, i.e. the
+    /// platform's speaker_*/mic_* callbacks (AudioBridge).
+    var audio = true
     var traceEvents: [String] = []
 
     var isRanchu: Bool { machine.hasPrefix("ranchu") }
@@ -82,7 +91,7 @@ struct QemuArgumentBuilder {
 
     static let kernelCommandLine =
         "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 " +
-        "ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig"
+        "ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig mac80211_hwsim.radios=0"
 
     /// QEMU option values use ',' as separator; a literal comma is ",,".
     static func escape(_ path: String) -> String { path.replacingOccurrences(of: ",", with: ",,") }
@@ -117,8 +126,11 @@ struct QemuArgumentBuilder {
         a += [
             "-nodefaults",
             "-display", "none",
-            "-chardev", "file,id=serial0,path=\(Self.escape(serialLog.path))",
-            "-serial", "chardev:serial0",
+            // Engine-owned console (ringbuf, still logged to serialLog): the
+            // engine types on it for the guest clock sync after a restore and
+            // the guest setup at boot (hw/android/guest_time.c).
+            "-chardev", "ringbuf,id=vaconsole,size=65536,logfile=\(Self.escape(serialLog.path))",
+            "-serial", "chardev:vaconsole",
             "-kernel", kernel.path,
             "-initrd", initrd.path,
             "-append", Self.kernelCommandLine,
@@ -135,6 +147,9 @@ struct QemuArgumentBuilder {
         var netdev = "user,id=mynet"
         if !isRanchu, let port = adbHostPort { netdev += ",hostfwd=tcp:127.0.0.1:\(port)-:5555" }
         a += ["-netdev", netdev, "-device", "virtio-net-device,netdev=mynet"]
+        if isRanchu && wifi {
+            a += ["-netdev", "user,id=wifi0,dhcpstart=10.0.2.16", "-device", "va-wifi-pci,netdev=wifi0"]
+        }
         a += ["-device", "virtio-rng-device"]
         a += [
             "-chardev", "file,id=forhvc0,path=\(Self.escape(hvc0Log.path))",
@@ -143,6 +158,13 @@ struct QemuArgumentBuilder {
             "-device", "virtconsole,chardev=forhvc0",
             "-device", "virtconsole,chardev=forhvc1",
         ]
+        if isRanchu && bluetooth {
+            a += ["-device", "va-bluetooth"]
+        }
+        if isRanchu && audio {
+            a += ["-audiodev", "va,id=snd0,out.frequency=48000,in.frequency=48000,in.channels=1",
+                  "-device", "virtio-sound-pci,audiodev=snd0"]
+        }
         if isRanchu {
             // adbd and the pipe-port services (clipboard ...) use vsock.
             var vsock = "va-vsock-pci,guest-cid=\(vsockGuestCID)"

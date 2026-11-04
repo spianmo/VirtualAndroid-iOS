@@ -40,6 +40,9 @@ DEFAULTS = {
     # The services' qemud camera speaks protocol v0 only (v1 needs a
     # goldfish address-space camera sub-device).
     "androidboot.qemu.camera_protocol_ver": "0",
+    # Wi-Fi like the emulator: init.ranchu-net.sh creates the mac80211_hwsim
+    # radio wlan0, whose frames go to the engine's va-wifi-pci access point.
+    "androidboot.qemu.virtiowifi": "1",
     "androidboot.qemu.avd_name": "virtualandroid",
     # Values from the image's VerifiedBootParams.textproto.
     "androidboot.vbmeta.size": "6208",

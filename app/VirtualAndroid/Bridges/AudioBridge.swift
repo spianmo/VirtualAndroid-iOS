@@ -7,6 +7,10 @@ import Foundation
 ///  * Microphone: an input tap converts to PCM16 interleaved at the guest's
 ///    rate/channels into a ring the engine drains with mic_read.
 /// The record permission prompt appears only when the guest opens the mic.
+/// The engine ("va" audio backend) feeds the speaker at most ~20 ms ahead of
+/// real time (the guest's ALSA buffer is only ~44 ms), so the session asks
+/// for a 5 ms IO buffer: with iOS's default (~21 ms) every render pull would
+/// find the ring short.
 final class AudioBridge {
     private let queue = DispatchQueue(label: "va.audio")
     private let lock = NSLock()
@@ -311,6 +315,7 @@ final class AudioBridge {
             } else {
                 try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             }
+            try session.setPreferredIOBufferDuration(0.005)
             if any { try session.setActive(true) }
         } catch {
             NSLog("VirtualAndroid: audio session error: \(error)")

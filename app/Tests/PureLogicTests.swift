@@ -59,12 +59,17 @@ check(argv.contains("socket,id=qmp0,fd=7") && argv.contains("chardev=qmp0,mode=c
 // ranchu (default): adb over va-vsock-pci, no slirp forward; like run-macos.sh --machine ranchu.
 check(argv.contains("user,id=mynet"), "no hostfwd on ranchu")
 check(argv.contains("va-vsock-pci,guest-cid=77,adb-port=5555,pipe-port=5000"), "vsock adb")
+check(argv.contains("va-wifi-pci,netdev=wifi0") && argv.contains("user,id=wifi0,dhcpstart=10.0.2.16"), "wifi ap")
+check(argv.contains("va-bluetooth"), "bluetooth controller")
+check(argv.contains("virtio-sound-pci,audiodev=snd0") && argv.contains { $0.hasPrefix("va,id=snd0,") }, "sound card on the va backend")
+check(argv.contains("chardev:vaconsole") && argv.contains { $0.hasPrefix("ringbuf,id=vaconsole,") }, "engine console")
 check(argv[argv.firstIndex(of: "-M")! + 1] == "ranchu", "machine ranchu (bundle gfx lookup)")
 var bv = b
 bv.machine = "virt"
 let argvVirt = bv.build()
 check(argvVirt.contains("user,id=mynet,hostfwd=tcp:127.0.0.1:5555-:5555") && !argvVirt.contains("-device") == false, "virt hostfwd")
 check(!argvVirt.joined(separator: " ").contains("va-vsock-pci"), "no vsock on virt")
+check(!argvVirt.contains("va-bluetooth") && !argvVirt.contains("va-wifi-pci,netdev=wifi0"), "no wifi/bt on virt")
 b.gfxLib = "/a,b/va_gfx"
 check(b.build().contains("ranchu,gfx-lib=/a,,b/va_gfx"), "gfx-lib escaped")
 b.graphics = false

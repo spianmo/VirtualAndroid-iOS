@@ -88,10 +88,23 @@ for ANGLE Metal otherwise). QEMU argv (`VM/QemuArguments.swift`) mirrors
 cache/system in that order (writable ones qcow2), virtio net
 (no slirp adb forward on ranchu), rng, virtio-serial hvc0/hvc1 (logcat) into
 files, `-device va-vsock-pci,guest-cid=77,adb-port=<port>,pipe-port=5000`
-(adbd and the clipboard service talk vsock), QMP. adb: port 5570 on the
+(adbd and the clipboard service talk vsock), QMP, and the radios/sound of
+`tools/run-macos.sh`: `va-wifi-pci` (the access point "AndroidWifi" that the
+guest's mac80211_hwsim wlan0 joins, on its own slirp network: this is the
+guest's internet), `va-bluetooth` (HCI controller on the virtio-serial port
+"bluetooth") and `virtio-sound-pci` on `-audiodev va` (the speaker/mic
+callbacks below). Each is added only if the embedded QEMU has it
+(`QemuEngine.supportsWifi/supportsBluetooth/supportsAudio`, probed in the
+binary; without Wi-Fi the bootconfig gets `qemu.virtiowifi=0`). Serial 0 is
+an engine-owned ringbuf (`-chardev ringbuf,id=vaconsole,logfile=serial.log`):
+the engine types on that console to sync the guest clock after a restore and,
+once per boot, to turn Android's captive-portal probe off (the probes go to
+Google servers; where those are blocked Wi-Fi would show "no internet"). adb: port 5570 on the
 simulator (it shares the Mac's loopback: `adb connect 127.0.0.1:5570`),
-off on devices unless `-VAAdbPort N`. Bootconfig: `opengles.version=196608`
-(ANGLE Metal GLES 3.0), `camera_protocol_ver=0`, and for dev builds
+off on devices unless `-VAAdbPort N`. Kernel command line: run-macos.sh's, with
+`mac80211_hwsim.radios=0` (the guest creates its one radio itself). Bootconfig:
+`opengles.version=196608` (ANGLE Metal GLES 3.0), `camera_protocol_ver=0`,
+`qemu.virtiowifi=1`, and for dev builds
 `androidboot.qemu.adb.pubkey` from `adbkey.pub` (Documents/adbkey.pub, else the
 image pack's copy, which `make_userdata_qcow2.sh --pack` takes from
 `~/.android/adbkey.pub`; `VA_NO_ADBKEY=1` for packs you give away).
@@ -180,8 +193,8 @@ postmigrate works. ranchu + gfx pending (board/gfx snapshot halves).
 | GNSS | CLLocationManager | when-in-use authorization requested on location_set_enabled(true) |
 | battery | UIDevice battery + thermalState | voltage nominal, temperature approximated; unknown (simulator) -> engine default |
 | clipboard | UIPasteboard | guest->iOS always; iOS->guest on "Paste" (or auto on activate if enabled) to avoid the paste prompt |
-| camera | AVCaptureSession 420f -> VTPixelTransferSession -> NV21 | back 90°, front 270°; synthetic camera when none (simulator) |
-| speaker / mic | AVAudioEngine + lock-free PCM16 rings (`Support/VARingBuffer.c`) | mic permission on mic_start; session .playback, .playAndRecord only while a real mic captures. **Simulator**: real input needs the Mac's microphone permission for Simulator, otherwise CoreAudio aborts the app ("Initialize: RPC timeout. Apparently deadlocked"), so the simulator uses a synthetic 300 Hz mic unless `-VASimulatorMic YES` |
+| camera | AVCaptureSession 420f -> VTPixelTransferSession -> NV21 | back 90°, front 270°; synthetic camera when none (simulator). The guest camera HAL writes frames into gralloc CPU buffers that live in goldfish_address_space memory; the renderer reads them by DMA (`va_gfx_set_dma_host_addr`), so preview and photos need an engine and libva_gfx from 2026-11-04 or later |
+| speaker / mic | virtio-sound -> engine `va` audio backend -> AVAudioEngine + lock-free PCM16 rings (`Support/VARingBuffer.c`) | 48 kHz; the engine feeds the speaker at most 20 ms ahead of real time (the guest's ALSA buffer is ~44 ms), so the session asks for a 5 ms IO buffer. Mic permission on mic_start; session .playback, .playAndRecord only while a real mic captures. **Simulator**: real input needs the Mac's microphone permission for Simulator, otherwise CoreAudio aborts the app ("Initialize: RPC timeout. Apparently deadlocked"), so the simulator uses a synthetic 300 Hz mic unless `-VASimulatorMic YES` |
 | vibrator | CoreHaptics continuous event | |
 
 Sensor timestamps are host CLOCK_UPTIME_RAW ns (CoreMotion's time base).
@@ -218,7 +231,8 @@ Screenshots: `docs/screenshot-real-boot.png`, `docs/screenshot-real-home.png`,
 `-VAStubDiagnostics gnss,camera,mic,tone,sensors,vibrate,copy` (stub: simulate
 guest requests after boot and log every bridge's status 6 s later),
 `-VASimulatorMic YES`, `-VASnapshotSupport YES|NO`, `-VAFastResume NO`, `-VAAdbPort N`, `-VATrace event,...`, `-VADumpFrames YES`
-(libva_gfx PNG dumps in vms/default/frames), `-VAScript "wait:5;tap:0.31,0.74;key:172"`
+(libva_gfx PNG dumps in vms/default/frames), `-VAStatusLog N` (every N s, log each bridge's
+status line, e.g. speaker underruns, to the os_log; read with `log show --info`), `-VAScript "wait:5;tap:0.31,0.74;key:172"`
 (after boot: guest-coordinate taps through the view mapping, keys). Pre-grant simulator permissions with
 `xcrun simctl privacy <udid> grant location|camera|microphone|motion dev.virtualandroid.app`
 and set a position with `xcrun simctl location <udid> set <lat>,<lon>`.

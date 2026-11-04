@@ -100,6 +100,20 @@ final class QemuEngine: VMEngine {
         return data.range(of: Data("snapshot-dir\0".utf8)) != nil
     }()
 
+    /// The embedded QEMU has the ranchu Wi-Fi access point / Bluetooth
+    /// controller devices (probed like `supportsSnapshots`: an unknown
+    /// `-device` makes QEMU exit).
+    static let supportsWifi = embeddedQemuContains("va-wifi-pci\0")
+    static let supportsBluetooth = embeddedQemuContains("va-bluetooth\0")
+    /// The "va" audio backend (its driver description string).
+    static let supportsAudio = embeddedQemuContains("VirtualAndroid host platform audio")
+
+    private static func embeddedQemuContains(_ marker: String) -> Bool {
+        guard let path = selectFramework()?.path,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .alwaysMapped) else { return false }
+        return data.range(of: Data(marker.utf8)) != nil
+    }
+
     /// The argv (minus the per-launch QMP fd and restore flags) for `config`.
     static func makeBuilder(config: VMLaunchConfig, storage: VMStorage, accel: AccelMode,
                             gfx: String?) -> QemuArgumentBuilder {
@@ -122,6 +136,9 @@ final class QemuEngine: VMEngine {
         b.gfxLib = gfx
         b.graphics = gfx != nil
         b.adbHostPort = config.adbPort
+        b.wifi = supportsWifi
+        b.bluetooth = supportsBluetooth
+        b.audio = supportsAudio
         b.traceEvents = config.traceEvents
         if config.snapshotMode {
             b.ramFile = storage.ramImage.path
@@ -158,6 +175,9 @@ final class QemuEngine: VMEngine {
         var o = ["androidboot.qemu.skin": "\(config.displayWidth)x\(config.displayHeight)"]
         if let key = config.storage?.adbPublicKey {
             o["androidboot.qemu.adb.pubkey"] = key
+        }
+        if !supportsWifi {
+            o["androidboot.qemu.virtiowifi"] = "0"
         }
         return o
     }

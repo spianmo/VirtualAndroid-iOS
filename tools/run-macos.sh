@@ -17,6 +17,9 @@
 # if built; "none" = no graphics). --screenshot-dir DIR writes guest frames to DIR/latest.png
 # (+ the first few as frame-N.png; VA_DUMP_EVERY=N sets the interval, default 30 frames).
 # ranchu also adds services' va-vsock-pci (adb on 127.0.0.1:PORT via vsock, pipe-port 5000);
+# va-wifi-pci, the access point "AndroidWifi" the guest's wlan0 joins (own slirp net),
+# va-bluetooth, the Bluetooth controller on the virtio-serial port "bluetooth", and
+# virtio-sound-pci on the "va" audio backend (the platform's speaker and microphone).
 # boot check: adb -s 127.0.0.1:PORT shell getprop sys.boot_completed
 # VA_HOST_PLATFORM=<libva_host_macos.dylib> (host/macos/build.sh) loads the test platform.
 # QMP is always on $RUN/qmp.sock.
@@ -92,6 +95,16 @@ if [[ $MACHINE == ranchu* ]]; then
   # adbd (and clipboard etc. over pipe-port 5000) talk vsock: services' user-space vsock
   # device bridges adb to 127.0.0.1:$ADB_PORT, so slirp doesn't forward it.
   EXTRA_DEV=(-device va-vsock-pci,guest-cid=77,adb-port=$ADB_PORT,pipe-port=5000)
+  # Wi-Fi: the guest's mac80211_hwsim radio talks to the engine's access point
+  # ("AndroidWifi"), bridged to its own slirp network (as the emulator does).
+  EXTRA_DEV+=(-netdev user,id=wifi0,dhcpstart=10.0.2.16 -device va-wifi-pci,netdev=wifi0)
+  # Bluetooth: the engine's HCI controller on the virtio-serial port "bluetooth"
+  # (the guest's bt_vhci_forwarder bridges it to /dev/vhci).
+  EXTRA_DEV+=(-device va-bluetooth)
+  # Audio: virtio-sound (the image's goldfish audio HAL plays/records on card 0) on the
+  # engine's "va" backend, i.e. the platform's speaker/mic callbacks (VA_HOST_PLATFORM).
+  EXTRA_DEV+=(-audiodev va,id=snd0,out.frequency=48000,in.frequency=48000,in.channels=1
+              -device virtio-sound-pci,audiodev=snd0)
   NET_FWD=""
   [[ $GFX_LIB == auto ]] && GFX_LIB=$ROOT/gfx/build-macos/dist/libva_gfx.dylib
   [[ $GFX_LIB == auto || ! -f $GFX_LIB ]] && [[ $GFX_LIB != none ]] && {
@@ -116,7 +129,7 @@ ARGS=(
   -M $MACHINE $CPU -smp 4 $MEM_OPT -nodefaults $DISPLAY_OPT
   $SERIAL_OPT -monitor unix:$RUN/monitor.sock,server,nowait -qmp unix:$RUN/qmp.sock,server=on,wait=off
   -kernel $IMG/kernel-ranchu -initrd $RUN/initrd
-  -append "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig"
+  -append "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig mac80211_hwsim.radios=0"
   # Order matters: it fixes the virtio-mmio addresses the image's fstab expects.
   -drive index=0,id=vendor,if=none,file=$IMG/vendor.img,read-only=on,format=raw -device virtio-blk-device,drive=vendor
   -drive index=1,id=encrypt,if=none,file=$RUN/encryptionkey.img,format=raw -device virtio-blk-device,drive=encrypt

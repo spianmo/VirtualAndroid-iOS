@@ -79,6 +79,7 @@ final class VMController: ObservableObject, EngineDelegate {
         static let forceOrientation = "VAForceOrientation", selfTest = "VASelfTest"
         static let stubDiagnostics = "VAStubDiagnostics"
         static let adbPort = "VAAdbPort", trace = "VATrace", dumpFrames = "VADumpFrames"
+        static let statusLog = "VAStatusLog"   // seconds: log every bridge's status line periodically
         static let script = "VAScript"   // after boot: "wait:5;tap:0.5,0.9;wait:3;key:172"     // e.g. "gnss,camera,mic,tone,sensors,vibrate,copy"
     }
 
@@ -710,8 +711,19 @@ final class VMController: ObservableObject, EngineDelegate {
         }
     }
 
+    private var statusLogTimer: Timer?
+
     /// Dev hooks that run once the guest is usable (cold boot or restore).
     private func runAfterBootHooks() {
+        let statusEvery = defaults.double(forKey: Keys.statusLog)
+        if statusEvery > 0, statusLogTimer == nil {
+            statusLogTimer = Timer.scheduledTimer(withTimeInterval: statusEvery, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    for line in self.host.statusLines() { self.log(1, "status: \(line)") }
+                }
+            }
+        }
         do {
             if let list = defaults.string(forKey: Keys.stubDiagnostics), let diag = stubDiagnostics {
                 let items = Set(list.split(separator: ",").map { String($0) })

@@ -24,6 +24,9 @@ enum BootConfig {
         "androidboot.qemu.settings.system.screen_off_timeout": "2147483647",
         // The services' qemud camera speaks protocol v0 only.
         "androidboot.qemu.camera_protocol_ver": "0",
+        // Wi-Fi: the guest's mac80211_hwsim radio wlan0 joins the engine's
+        // va-wifi-pci access point (the app sets "0" if the engine lacks it).
+        "androidboot.qemu.virtiowifi": "1",
         "androidboot.qemu.avd_name": "virtualandroid",
         // Values from the image's VerifiedBootParams.textproto.
         "androidboot.vbmeta.size": "6208",
