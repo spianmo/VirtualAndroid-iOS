@@ -387,10 +387,11 @@ Debugging aids:
 
 The runtime is merged into the iOS engine source (engine/qemu-ios, branch
 `ios` at 231f0b92c: master 0e17cd59b + `aot` up to a1a9daff4, including the
-TCTI fix 08b6a2cac, plus 55bb17924, which keeps the translation-time
-counters always on and prints
+TCTI fix 08b6a2cac, plus 55bb17924; merged into engine master as
+16d34a09f). 55bb17924 keeps the translation-time counters always on and
+prints
 `aot: translated N TBs, … table hits, … mismatches, … native` at exit when a
-table is loaded). The cache ships as its own framework, `va_aot.framework`,
+table is loaded. The cache ships as its own framework, `va_aot.framework`,
 next to the TCTI QEMU slice it is bound to; the app sets `QEMU_AOT_LIB` to it
 under TCTI (`-VAAOT NO` turns it off for A/B runs).
 
