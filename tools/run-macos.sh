@@ -116,7 +116,7 @@ ARGS=(
   -M $MACHINE $CPU -smp 4 $MEM_OPT -nodefaults $DISPLAY_OPT
   $SERIAL_OPT -monitor unix:$RUN/monitor.sock,server,nowait -qmp unix:$RUN/qmp.sock,server=on,wait=off
   -kernel $IMG/kernel-ranchu -initrd $RUN/initrd
-  -append "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 printk.devkmsg=on bootconfig"
+  -append "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig"
   # Order matters: it fixes the virtio-mmio addresses the image's fstab expects.
   -drive index=0,id=vendor,if=none,file=$IMG/vendor.img,read-only=on,format=raw -device virtio-blk-device,drive=vendor
   -drive index=1,id=encrypt,if=none,file=$RUN/encryptionkey.img,format=raw -device virtio-blk-device,drive=encrypt

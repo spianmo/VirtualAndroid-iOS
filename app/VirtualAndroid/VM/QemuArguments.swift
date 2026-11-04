@@ -82,7 +82,7 @@ struct QemuArgumentBuilder {
 
     static let kernelCommandLine =
         "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 " +
-        "ndns=2 loop.max_part=7 printk.devkmsg=on bootconfig"
+        "ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig"
 
     /// QEMU option values use ',' as separator; a literal comma is ",,".
     static func escape(_ path: String) -> String { path.replacingOccurrences(of: ",", with: ",,") }
