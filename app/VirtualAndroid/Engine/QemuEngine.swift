@@ -100,11 +100,12 @@ final class QemuEngine: VMEngine {
             memoryMB: config.memoryMB,
             kernel: storage.kernel,
             initrd: storage.initrd,
-            vendor: DiskImage(url: storage.vendor, format: "raw", readOnly: true),
+            // Device packs may ship system/vendor as qcow2 (sparse: 1.2 GB vs 4 GB raw).
+            vendor: DiskImage.detect(storage.vendor, readOnly: true),
             encryption: DiskImage.detect(storage.encryption, readOnly: false),
             userdata: DiskImage.detect(storage.userdata, readOnly: false),
             cache: DiskImage.detect(storage.cache, readOnly: false),
-            system: DiskImage(url: storage.system, format: "raw", readOnly: true),
+            system: DiskImage.detect(storage.system, readOnly: true),
             serialLog: storage.serialLog,
             hvc0Log: storage.hvc0Log,
             logcatLog: storage.logcatLog)
