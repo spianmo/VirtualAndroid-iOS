@@ -115,6 +115,21 @@
 | 运行中被杀 | 快照被拒（not clean），冷启动，ext4 日志恢复正常 |
 | 客户机时间 | 恢复后客户机 `date +%s` 和宿主一致 |
 
-**未完成**：
-- 带真实 GPU 状态的端到端验证。gfx 当前的 `va_gfx_snapshot_save` 在 `glGetTexImage` 上段错误（没有 GL context，而且调用的是系统 OpenGL.framework 里的函数）。
-- 恢复后的首帧时间，要等 GPU 状态能用之后才能测。
+**实测（真实 GPU 状态：libva_gfx 47fe495 + 引擎 0e17cd59b，不开 stub）**：
+
+ranchu 必须把 `pipe_stream_put_buffer/get_buffer` 传给 libva_gfx（0e17cd59b）。否则图形 pipe 恢复后被关闭，客户机报 EGL_BAD_ALLOC，launcher 崩溃循环。
+
+| 项目 | 主机负载低时 | 主机满载时（load 310，同时有其他 agent 的 VM 和编译） |
+|---|---|---|
+| 挂起 | 317–458 ms（va-gfx 段 277 ms）；state.bin 2.8 MB，gfx/ 9–13 MB | 0.6–2.1 s；打开 Settings 后 state.bin 13 MB |
+| 恢复：客户机开始运行 | 启动后 757–842 ms（va-gfx 加载约 0.5 s） | 1.3–4.1 s |
+| 恢复：第一帧新画面 | 启动后 783–871 ms | 1.3–4.6 s |
+| 恢复：adb boot_completed=1 | 启动后 879–932 ms | 1.7–8.2 s |
+
+- 恢复后的桌面正常，时钟正确。所有图形 pipe 都恢复成功（restored=1）。
+- 打开 Settings 返回 ok，画面正常。之后 2 分钟：watchdog 0 次、native crash 0 次、EGL_BAD_ALLOC 0 次。
+- 连续 3 轮"挂起 → 退出 → 恢复 → HOME → 打开 Settings"都通过：每轮 fatal=0、badalloc=0、watchdog=0。
+
+**待办**：
+- 在主机空闲时复测上面的耗时（目标 < 3 s 已经达到；满载时的波动主要是 CPU 竞争）。
+- 剪贴板 pipe 没有 save/load，恢复后会重连。
