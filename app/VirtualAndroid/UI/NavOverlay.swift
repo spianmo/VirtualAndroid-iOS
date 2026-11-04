@@ -96,9 +96,7 @@ struct NavOverlay: View {
             Picker("Rotation", selection: $vm.rotationMode) {
                 ForEach(DisplayRotationMode.allCases) { Text($0.label).tag($0) }
             }
-            if vm.engine?.supportsSnapshots == true {
-                Button("Save quick-boot snapshot", systemImage: "camera.metering.matrix") { vm.saveQuickBootSnapshot() }
-            }
+            Button("Cold boot (discard snapshot)", systemImage: "arrow.counterclockwise") { vm.coldBootNow() }
             Button("Diagnostics", systemImage: "waveform.path.ecg") { showDiagnostics = true }
             Button("Hide controls", systemImage: "eye.slash") { vm.showNavControls = false }
             Divider()

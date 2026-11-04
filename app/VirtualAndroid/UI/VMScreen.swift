@@ -21,6 +21,20 @@ struct VMScreen: View {
             .padding(.top, 8)
             .animation(.easeInOut(duration: 0.3), value: vm.phase)
 
+            if vm.phase == .restoring {
+                VStack(spacing: 10) {
+                    ProgressView().controlSize(.large).tint(.white)
+                    Text("Restoring…").font(.headline)
+                }
+                .padding(22)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+                .accessibilityIdentifier("va-restoring")
+            }
+            if vm.phase == .suspending || vm.phase == .suspended {
+                Label(vm.phase == .suspending ? "Saving…" : "Suspended", systemImage: "moon.zzz")
+                    .padding(14)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
             if vm.phase == .paused {
                 Button {
                     vm.resume()

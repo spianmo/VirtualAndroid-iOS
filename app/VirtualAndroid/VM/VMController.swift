@@ -4,11 +4,12 @@ import SwiftUI
 import UIKit
 
 /// Owns the VM lifecycle: image setup, engine selection, boot / pause /
-/// resume / shutdown, snapshots (placeholder) and the platform bridges.
+/// resume / shutdown, M4 snapshots (suspend on background, restore on cold
+/// launch; state machine in Snapshot.swift) and the platform bridges.
 @MainActor
 final class VMController: ObservableObject, EngineDelegate {
     enum Phase: Equatable {
-        case idle, installing, booting, running, paused, stopping, stopped, failed
+        case idle, installing, booting, restoring, running, paused, suspending, suspended, stopping, stopped, failed
     }
 
     @Published private(set) var phase: Phase = .idle
@@ -23,11 +24,15 @@ final class VMController: ObservableObject, EngineDelegate {
     @Published private(set) var logLines: [String] = []
     @Published private(set) var activeEngine: EngineKind?
     @Published private(set) var snapshotInfo: String?
+    /// QEMU ran in this process already; a (cold) boot needs a relaunch.
+    @Published private(set) var relaunchRequired = false
+    @Published private(set) var restoreTimings: String?
 
     // Settings (UserDefaults; launch arguments like `-VAEngine stub` override).
     @Published var engineKind: EngineKind { didSet { defaults.set(engineKind.rawValue, forKey: Keys.engine) } }
     @Published var autoBoot: Bool { didSet { defaults.set(autoBoot, forKey: Keys.autoBoot) } }
-    @Published var quickBoot: Bool { didSet { defaults.set(quickBoot, forKey: Keys.quickBoot) } }
+    /// M4: snapshot when leaving the app, restore on the next cold launch.
+    @Published var fastResume: Bool { didSet { defaults.set(fastResume, forKey: Keys.fastResume) } }
     @Published var rotationMode: DisplayRotationMode {
         didSet {
             defaults.set(rotationMode.rawValue, forKey: Keys.rotation)
@@ -50,15 +55,23 @@ final class VMController: ObservableObject, EngineDelegate {
     private(set) var engine: VMEngine?
     private(set) var launchConfig = VMLaunchConfig()
     private var androidRotation = 0
-    private var autoPaused = false
     private var qemuRanInThisProcess = false
+    private var lifecycle = VMLifecycle()
+    private var pendingConfig: VMLaunchConfig?
+    private var pendingKind: EngineKind = .stub
+    private var snapshotIdentity: SnapshotIdentity?
+    private var suspendStart: Date?
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var pendingColdBoot = false
+    private var restoreMarks: [String] = []
+    private var snapshots: SnapshotManager { SnapshotManager(storage: storage) }
     private var bootStart: Date?
     private var didAutoBoot = false
     private let defaults = UserDefaults.standard
     private let logger = Logger(subsystem: "dev.virtualandroid.app", category: "vm")
 
     private enum Keys {
-        static let engine = "VAEngine", autoBoot = "VAAutoBoot", quickBoot = "VAQuickBoot"
+        static let engine = "VAEngine", autoBoot = "VAAutoBoot", fastResume = "VAFastResume"
         static let rotation = "VARotationMode", clipboard = "VAClipboardAutoSync"
         static let background = "VAKeepRunningInBackground", nav = "VANavControls", navExpanded = "VANavExpanded"
         // Developer overrides (launch arguments, e.g. `-VAMachine virt -VAAutoStopAfter 90`).
@@ -70,10 +83,10 @@ final class VMController: ObservableObject, EngineDelegate {
     }
 
     init() {
-        defaults.register(defaults: [Keys.autoBoot: true, Keys.nav: true])
+        defaults.register(defaults: [Keys.autoBoot: true, Keys.nav: true, Keys.fastResume: true])
         engineKind = EngineKind(rawValue: defaults.string(forKey: Keys.engine) ?? "") ?? .auto
         autoBoot = defaults.bool(forKey: Keys.autoBoot)
-        quickBoot = defaults.bool(forKey: Keys.quickBoot)
+        fastResume = defaults.bool(forKey: Keys.fastResume)
         rotationMode = DisplayRotationMode(rawValue: defaults.string(forKey: Keys.rotation) ?? "") ?? .followDevice
         clipboardAutoSync = defaults.bool(forKey: Keys.clipboard)
         keepRunningInBackground = defaults.bool(forKey: Keys.background)
@@ -98,7 +111,14 @@ final class VMController: ObservableObject, EngineDelegate {
 
     var phaseName: String { "\(phase)" }
 
-    var isVMActive: Bool { [.booting, .running, .paused, .stopping].contains(phase) }
+    var isVMActive: Bool {
+        [.booting, .restoring, .running, .paused, .suspending, .suspended, .stopping].contains(phase)
+    }
+
+    /// The active (or chosen) engine can snapshot (QEMU: board support probed).
+    func engineSupportsSnapshots(_ kind: EngineKind) -> Bool {
+        kind == .qemu ? QemuEngine.supportsSnapshots : true
+    }
 
     /// `.auto` -> QEMU only when the frameworks are embedded and an image is installed.
     var resolvedEngineKind: EngineKind {
@@ -125,8 +145,7 @@ final class VMController: ObservableObject, EngineDelegate {
     func refreshImageState() {
         imageInstalled = storage.isImageInstalled
         packLocation = storage.findPack()
-        let meta = SnapshotStore(url: storage.snapshotMetadata).load()
-        snapshotInfo = meta.map { "\($0.tag) · \($0.engine) · \($0.created.formatted(date: .abbreviated, time: .shortened))" }
+        snapshotInfo = snapshots.summary
     }
 
     // MARK: Launch
@@ -172,34 +191,64 @@ final class VMController: ObservableObject, EngineDelegate {
             cfg.dumpFramesDir = storage.vmDir.appendingPathComponent("frames").path
             try? FileManager.default.createDirectory(atPath: cfg.dumpFramesDir!, withIntermediateDirectories: true)
         }
-        let engineName = kind == .qemu ? "qemu" : "stub"
-
-        let snapshots = SnapshotStore(url: storage.snapshotMetadata)
-        if quickBoot, let meta = snapshots.load() {
-            if meta.fingerprint == SnapshotStore.fingerprint(storage: storage, config: cfg, engine: engineName) {
-                cfg.restoreSnapshotTag = meta.tag
-                log(1, "quick boot: restoring snapshot \(meta.tag)")
-            } else {
-                log(2, "quick boot: snapshot does not match this image/config, cold booting")
-                snapshots.invalidate()
-            }
+        guard !(kind == .qemu && qemuRanInThisProcess) else {
+            relaunchRequired = true
+            fail("QEMU can only run once per app process. Relaunch the app to boot again.")
+            return
         }
-
-        let newEngine: VMEngine
-        switch kind {
-        case .qemu:
-            guard !qemuRanInThisProcess else {
-                fail("QEMU can only run once per app process. Relaunch the app to boot again.")
-                return
-            }
+        if kind == .qemu {
             guard imageInstalled else {
                 fail("Android image not installed: missing \(storage.missingImageFiles().joined(separator: ", "))")
                 return
             }
+        }
+
+        // M4: restore a clean, matching snapshot, else cold boot.
+        let supported = engineSupportsSnapshots(kind)
+        cfg.snapshotMode = fastResume && supported
+        let identity = kind == .qemu ? QemuEngine.snapshotIdentity(config: cfg) : StubEngine.snapshotIdentity(config: cfg)
+        snapshotIdentity = identity
+        let manifest = snapshots.loadManifest()
+        let expectedRam = kind == .qemu ? Int64(cfg.memoryMB) << 20 : 0
+        let validity = identity.map {
+            SnapshotValidator.validate(manifest: manifest, identity: $0, files: snapshots.files(expectedRamBytes: expectedRam))
+        } ?? .invalid("no engine identity")
+        let plan = LaunchPlan.decide(snapshotsEnabled: fastResume, engineSupportsSnapshots: supported && identity != nil,
+                                     manifest: manifest, validity: validity)
+        switch plan {
+        case .restore:
+            log(1, "snapshot valid (saved \(manifest!.savedAt.formatted(date: .omitted, time: .standard))): restoring")
+            cfg.restoreStateFile = storage.stateBin
+            lifecycle = VMLifecycle()
+            lifecycle.setRestoredBootCompleted(manifest?.guestBootCompleted ?? true)
+        case .coldBoot(_, let reason):
+            log(1, "cold boot: \(reason)")
+            lifecycle = VMLifecycle()
+        }
+        pendingConfig = cfg
+        pendingKind = kind
+        restoreMarks = []
+        send(.launch(plan))
+    }
+
+    /// Starts the engine for the pending config (restore or cold boot).
+    private func startEngine() {
+        guard var cfg = pendingConfig else { return }
+        pendingConfig = nil
+        let kind = pendingKind
+        if cfg.restoreStateFile == nil {
+            // A cold boot starts from fresh RAM and invalidates any snapshot.
+            snapshots.discard(keepRAM: false)
+        }
+        let newEngine: VMEngine
+        switch kind {
+        case .qemu:
             do {
                 try storage.prepareVM(bootOverrides: QemuEngine.bootOverrides(config: cfg))
+                if cfg.snapshotMode { try snapshots.prepareDirectory() }
             } catch {
                 fail(error.localizedDescription)
+                syncPhase(failed: true)
                 return
             }
             let available = va_runtime_available_memory()
@@ -210,29 +259,34 @@ final class VMController: ObservableObject, EngineDelegate {
             newEngine = QemuEngine()
             qemuRanInThisProcess = true
         default:
+            try? snapshots.prepareDirectory()
+            cfg.storage = storage
             newEngine = StubEngine()
         }
 
         newEngine.delegate = self
-        host.engine = newEngine
+        host.target = newEngine
         displayView.input = newEngine
+        setInputGate(open: cfg.restoreStateFile == nil)
         displayView.setGuestSize(width: cfg.displayWidth, height: cfg.displayHeight)
         host.battery.start()
         do {
             try newEngine.start(config: cfg, host: host, frames: displayView)
         } catch {
-            host.engine = nil
+            host.target = nil
             displayView.input = nil
             fail(error.localizedDescription)
+            lifecycle.handle(.engineStopped)
+            syncPhase(failed: true)
             return
         }
         engine = newEngine
         launchConfig = cfg
         activeEngine = kind
         bootStart = Date()
-        phase = .booting
         newEngine.setDisplayRotation(androidRotation)
-        log(1, "booting with \(newEngine.displayName) engine (machine \(cfg.machine))")
+        log(1, "\(cfg.restoreStateFile != nil ? "restoring" : "booting") with \(newEngine.displayName) engine " +
+               "(machine \(cfg.machine), snapshots \(cfg.snapshotMode ? "on" : "off"))")
         let stopAfter = defaults.double(forKey: Keys.autoStopAfter)
         if stopAfter > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter) { [weak self, weak newEngine] in
@@ -243,14 +297,144 @@ final class VMController: ObservableObject, EngineDelegate {
         }
     }
 
+    // MARK: Lifecycle state machine
+
+    private func send(_ event: VMLifecycle.Event) {
+        let actions = lifecycle.handle(event)
+        for action in actions { perform(action) }
+        syncPhase()
+    }
+
+    private func perform(_ action: VMLifecycle.Action) {
+        switch action {
+        case .discardSnapshot:
+            snapshots.discard(keepRAM: engine != nil)
+            log(1, "snapshot discarded")
+            refreshImageState()
+        case .startColdBoot, .startRestore:
+            startEngine()
+        case .showLastFrame:
+            if let surface = FrameImage.surface(fromPNG: storage.lastFrame) {
+                displayView.showPlaceholder(surface)
+                markRestore("last frame shown")
+            }
+        case .pause:
+            setInputGate(open: false)
+            engine?.pause()
+        case .suspend:
+            guard let engine else { return }
+            setInputGate(open: false)
+            suspendStart = Date()
+            engine.suspend(stateFile: storage.stateTmp) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success: self.send(.suspendSaved)
+                case .failure(let e):
+                    self.log(3, "suspend failed: \(e.localizedDescription)")
+                    self.send(.suspendFailed(e.localizedDescription))
+                }
+                self.endBackgroundTask()
+            }
+        case .finalizeSnapshot:
+            finalizeSnapshot()
+        case .markDirty:
+            do {
+                try snapshots.markDirty()
+            } catch {
+                // Never run the guest on a clean manifest: drop the snapshot instead.
+                log(3, "could not mark snapshot dirty (\(error.localizedDescription)); discarding it")
+                snapshots.discard(keepRAM: true)
+            }
+        case .cont:
+            setInputGate(open: true)
+            engine?.resume()
+        case .requireRelaunch(let message):
+            relaunchRequired = true
+            lastError = message
+            log(3, message)
+        }
+    }
+
+    private func finalizeSnapshot() {
+        guard let identity = snapshotIdentity else { return }
+        let ms = Int(Date().timeIntervalSince(suspendStart ?? Date()) * 1000)
+        if let frame = displayView.latestFrame(), let image = FrameImage.cgImage(from: frame.surface) {
+            _ = FrameImage.writePNG(image, to: storage.lastFrame)
+        }
+        do {
+            try snapshots.finalize(identity: identity, guestBootCompleted: lifecycle.guestBootCompleted, suspendMillis: ms)
+            log(1, "snapshot saved: device state \(ms) ms, total \(Int(Date().timeIntervalSince(suspendStart ?? Date()) * 1000)) ms " +
+                   "(state.bin \(storage.fileSize(storage.stateBin) >> 10) KB)")
+        } catch {
+            log(3, "snapshot finalize failed: \(error.localizedDescription)")
+            snapshots.discard(keepRAM: true)
+        }
+        refreshImageState()
+    }
+
+    private func syncPhase(failed: Bool = false) {
+        if failed { phase = .failed; return }
+        switch lifecycle.state {
+        case .idle: phase = .idle
+        case .coldBooting: if phase != .stopping { phase = .booting }
+        case .restoring: phase = .restoring
+        case .running: if phase != .stopping { phase = .running }
+        case .userPaused, .pausedInBackground: phase = .paused
+        case .suspending: phase = .suspending
+        case .suspended: phase = .suspended
+        case .stopped: phase = .stopped
+        case .failed: phase = .failed
+        }
+    }
+
+    /// Host events (touch, keys, sensors, GNSS, battery, clipboard) reach the
+    /// engine only while the guest runs.
+    private func setInputGate(open: Bool) {
+        host.forwarding = open
+        displayView.inputEnabled = open
+    }
+
+    private func markRestore(_ what: String) {
+        let line = "\(what) +\(ProcessClock.sinceLaunchMs) ms"
+        restoreMarks.append(line)
+        restoreTimings = restoreMarks.joined(separator: ", ")
+        log(1, "restore: \(line) (since process start)")
+    }
+
+    private func endBackgroundTask() {
+        if backgroundTask != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+            backgroundTask = .invalid
+        }
+    }
+
+    // MARK: User actions
+
+    /// Settings: delete the snapshot; the next start cold boots.
+    func discardSnapshot() {
+        send(.discardSnapshot)
+    }
+
+    /// VM menu: discard the snapshot and stop; cold boot (stub: right away;
+    /// QEMU: after relaunch, since it runs once per process).
+    func coldBootNow() {
+        send(.discardSnapshot)
+        pendingColdBoot = true
+        engine?.forceStop()
+    }
+
+    func quitApp() {
+        exit(0)
+    }
+
     func pause() {
         guard phase == .running || phase == .booting else { return }
-        engine?.pause()
+        send(.userPause)
     }
 
     func resume() {
         guard phase == .paused else { return }
-        engine?.resume()
+        send(.userResume)
     }
 
     func shutdown() {
@@ -274,32 +458,6 @@ final class VMController: ObservableObject, EngineDelegate {
 
     func pasteHostClipboard() {
         host.clipboard.pushHostClipboard(force: true)
-    }
-
-    /// M4 placeholder: save a quick-boot snapshot of the running machine.
-    func saveQuickBootSnapshot() {
-        guard let engine, engine.supportsSnapshots, phase == .running else { return }
-        let tag = SnapshotStore.quickBootTag
-        let engineName = activeEngine == .qemu ? "qemu" : "stub"
-        let fingerprint = SnapshotStore.fingerprint(storage: storage, config: launchConfig, engine: engineName)
-        log(1, "saving snapshot \(tag)…")
-        engine.saveSnapshot(tag: tag) { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.log(3, "snapshot failed: \(error.localizedDescription)")
-                return
-            }
-            try? self.storage.makeDirectories()
-            try? SnapshotStore(url: self.storage.snapshotMetadata).save(
-                .init(tag: tag, created: Date(), fingerprint: fingerprint, engine: engineName))
-            self.log(1, "snapshot \(tag) saved")
-            self.refreshImageState()
-        }
-    }
-
-    func deleteSnapshot() {
-        SnapshotStore(url: storage.snapshotMetadata).invalidate()
-        refreshImageState()
     }
 
     // MARK: Developer hooks
@@ -436,15 +594,19 @@ final class VMController: ObservableObject, EngineDelegate {
     func scenePhaseChanged(_ scenePhase: ScenePhase) {
         switch scenePhase {
         case .background:
-            if !keepRunningInBackground, phase == .running || phase == .booting {
-                autoPaused = true
-                pause()
+            guard engine != nil else { return }
+            let canSnapshot = launchConfig.snapshotMode || (activeEngine == .stub && fastResume)
+            // iOS gives a few seconds; the suspend itself takes ~0.2-2 s.
+            if backgroundTask == .invalid {
+                backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "VirtualAndroid suspend") { [weak self] in
+                    self?.log(2, "background time expired before the suspend finished")
+                    self?.endBackgroundTask()
+                }
             }
+            send(.enterBackground(canSnapshot: canSnapshot, keepRunning: keepRunningInBackground))
+            if phase != .suspending { endBackgroundTask() }
         case .active:
-            if autoPaused {
-                autoPaused = false
-                resume()
-            }
+            if engine != nil { send(.enterForeground) }
             launchIfNeeded()
         default:
             break
@@ -469,15 +631,34 @@ final class VMController: ObservableObject, EngineDelegate {
         MainActor.assumeIsolated {
             guard self.engine === engine else { return }
             self.host.stopAll()
-            self.host.engine = nil
+            self.host.target = nil
             self.displayView.input = nil
             self.engine = nil
+            let kind = self.activeEngine
             self.activeEngine = nil
+            self.endBackgroundTask()
+            let wasRestoring = self.lifecycle.state == .restoring
+            if wasRestoring {
+                // QEMU exited during the load (e.g. exit() on a bad stream).
+                self.send(.restoreFailed(message ?? "engine exited during restore"))
+            } else {
+                self.send(.engineStopped)
+            }
             if fatal || status != 0 {
                 self.fail(message ?? "Engine exited with status \(status)")
-            } else {
-                self.phase = .stopped
+                self.syncPhase(failed: true)
+            } else if !wasRestoring {
                 self.log(1, "VM stopped")
+            }
+            if self.pendingColdBoot {
+                self.pendingColdBoot = false
+                if kind == .qemu {
+                    self.relaunchRequired = true
+                    self.lastError = "Snapshot discarded. Relaunch the app to cold boot."
+                } else {
+                    self.displayView.clearFrame()
+                    self.boot()
+                }
             }
         }
     }
@@ -486,18 +667,52 @@ final class VMController: ObservableObject, EngineDelegate {
         MainActor.assumeIsolated { self.log(level, message) }
     }
 
+    nonisolated func engine(_ engine: VMEngine, restoreFinished result: Result<Void, Error>) {
+        MainActor.assumeIsolated {
+            guard self.engine === engine else { return }
+            switch result {
+            case .success:
+                self.markRestore("state loaded")
+                self.displayView.onNextFrame = { [weak self] in self?.markRestore("first live frame") }
+                self.send(.restoreLoaded)
+                if self.lifecycle.state == .running {
+                    self.markRestore("guest running")
+                    self.bootProgress = 1
+                    self.runAfterBootHooks()
+                }
+            case .failure(let e):
+                self.log(3, "restore failed: \(e.localizedDescription)")
+                self.send(.restoreFailed(e.localizedDescription))
+            }
+        }
+    }
+
     private func handleGuestState(_ state: VaGuestState, from engine: VMEngine) {
         guard self.engine === engine else { return }
+        // Phases come from the lifecycle state machine; the engine's
+        // BOOTING/PAUSED reports (QMP STOP/RESUME, or a restored engine that
+        // does not know the guest had booted) are informational.
         switch state {
-        case VA_GUEST_BOOTING:
-            if phase != .stopping { phase = .booting }
         case VA_GUEST_BOOT_COMPLETED:
-            phase = .running
+            let wasBooting = lifecycle.state == .coldBooting
+            send(.bootCompleted)
+            guard wasBooting else { return }
             bootProgress = 1
             if let start = bootStart, bootSeconds == nil {
                 bootSeconds = Date().timeIntervalSince(start)
                 log(1, String(format: "boot completed in %.1f s", bootSeconds!))
             }
+            runAfterBootHooks()
+        case VA_GUEST_SHUTDOWN:
+            phase = .stopping
+        default:
+            break
+        }
+    }
+
+    /// Dev hooks that run once the guest is usable (cold boot or restore).
+    private func runAfterBootHooks() {
+        do {
             if let list = defaults.string(forKey: Keys.stubDiagnostics), let diag = stubDiagnostics {
                 let items = Set(list.split(separator: ",").map { String($0) })
                 var st = StubDiagnosticsState()
@@ -522,16 +737,6 @@ final class VMController: ObservableObject, EngineDelegate {
             if defaults.bool(forKey: Keys.selfTest) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.runSelfTest() }
             }
-            if quickBoot, launchConfig.restoreSnapshotTag == nil {
-                // First cold boot with quick boot on: snapshot once the home screen settled.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.saveQuickBootSnapshot() }
-            }
-        case VA_GUEST_PAUSED:
-            if phase != .stopping { phase = .paused }
-        case VA_GUEST_SHUTDOWN:
-            phase = .stopping
-        default:
-            break
         }
     }
 

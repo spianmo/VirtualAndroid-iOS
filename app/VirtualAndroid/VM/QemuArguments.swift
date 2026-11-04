@@ -72,7 +72,12 @@ struct QemuArgumentBuilder {
     var traceEvents: [String] = []
 
     var isRanchu: Bool { machine.hasPrefix("ranchu") }
-    var loadvmTag: String?
+    /// M4 snapshot mode: guest RAM in a shared file (mem-path) and the ranchu
+    /// `snapshot-dir` (renderer data). See docs/SNAPSHOT.md.
+    var ramFile: String?
+    var snapshotDir: String?
+    /// Restore: `-incoming defer` (+ `-S`, so nothing runs before `cont`).
+    var incomingDefer = false
     var extra: [String] = []
 
     static let kernelCommandLine =
@@ -96,13 +101,20 @@ struct QemuArgumentBuilder {
             } else if let gfxLib {
                 machineArg += ",gfx-lib=\(Self.escape(gfxLib))"
             }
+            if let snapshotDir { machineArg += ",snapshot-dir=\(Self.escape(snapshotDir))" }
         }
+        if ramFile != nil { machineArg += ",memory-backend=ram0" }
         var a: [String] = [
             "-M", machineArg,
             "-accel", accel.qemuValue,
             "-cpu", cpu,
             "-smp", "\(cpuCount)",
             "-m", "\(memoryMB)",
+        ]
+        if let ramFile {
+            a += ["-object", "memory-backend-file,id=ram0,size=\(memoryMB)M,mem-path=\(Self.escape(ramFile)),share=on"]
+        }
+        a += [
             "-nodefaults",
             "-display", "none",
             "-chardev", "file,id=serial0,path=\(Self.escape(serialLog.path))",
@@ -142,7 +154,7 @@ struct QemuArgumentBuilder {
         if let fd = qmpFD {
             a += ["-chardev", "socket,id=qmp0,fd=\(fd)", "-mon", "chardev=qmp0,mode=control"]
         }
-        if let tag = loadvmTag { a += ["-loadvm", tag] }
+        if incomingDefer { a += ["-S", "-incoming", "defer"] }
         return a + extra
     }
 }

@@ -17,13 +17,15 @@
 		2939CD2A2F11668F3F532C58 /* HapticsBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AEB2D0D71B3AF24B6B4999 /* HapticsBridge.swift */; };
 		2AE4103B01EE91C48510E2D8 /* QMPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09CF32C012D3E489C68B8163 /* QMPClient.swift */; };
 		2CDF2F2870D4561F5B76359C /* QemuEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11CE7D09E664C3D31ED2D020 /* QemuEngine.swift */; };
+		4AA9E3B2CB8B3A8CCAB2F401 /* SnapshotManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AEA097856A5967D58A9B96C /* SnapshotManager.swift */; };
+		4D7C3312F356362908BE8376 /* Snapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D66631358860C3FFBB5FFA7 /* Snapshot.swift */; };
 		508B2FE3CD1304DD87375FE6 /* LinuxKeymap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 324F7D4365E8B9C8EF578E0F /* LinuxKeymap.swift */; };
 		73C763FC54C2E1CED60C4144 /* LocationBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0BB360572329D0B77B296BD /* LocationBridge.swift */; };
 		786E1B1A9D5805DB98BBB02E /* VMStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7EEB024F237017E3FB9648D /* VMStorage.swift */; };
+		7B163896DE6637D17F6D8A86 /* FrameImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = D27F102F4F65EC47DD1AE88D /* FrameImage.swift */; };
 		7D2852C0762EBFDBA25E81C3 /* BatteryBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7611DD2037B250075CCA2648 /* BatteryBridge.swift */; };
 		7F7A62DB9B1DF31F870E9DB4 /* VMController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AEDE463D118D3ABD1A746FB /* VMController.swift */; };
 		8C49E6FB2484B555303EA9C3 /* RealBootUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C156C51494F31D729C8695F /* RealBootUITests.swift */; };
-		8DDD568B3337CDF0553C6A17 /* SnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 051BF7C63D2D1F7FAE2646C9 /* SnapshotStore.swift */; };
 		904B41C6D5D4A4B33D7CE8C9 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EDF9409366C9FE111CA6AEF /* HomeView.swift */; };
 		ACA6C05C1CAEE01E98CAE626 /* HostBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EDDF11BD258C91FE07267F2 /* HostBridge.swift */; };
 		BBA79FBF0FE7B641D9892EFF /* VirtualAndroidApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E7043FFBF44189BD8C41198 /* VirtualAndroidApp.swift */; };
@@ -50,7 +52,6 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		051BF7C63D2D1F7FAE2646C9 /* SnapshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotStore.swift; sourceTree = "<group>"; };
 		09CF32C012D3E489C68B8163 /* QMPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QMPClient.swift; sourceTree = "<group>"; };
 		11CE7D09E664C3D31ED2D020 /* QemuEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QemuEngine.swift; sourceTree = "<group>"; };
 		1A7ADBDCDC7C23C48A762CF8 /* NavOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavOverlay.swift; sourceTree = "<group>"; };
@@ -60,6 +61,8 @@
 		2F373EC3312A7A8CFA61FDE3 /* VirtualAndroidUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = VirtualAndroidUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		2FCA81FECD888DC17CB086DF /* MetalDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalDisplayView.swift; sourceTree = "<group>"; };
 		324F7D4365E8B9C8EF578E0F /* LinuxKeymap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinuxKeymap.swift; sourceTree = "<group>"; };
+		3AEA097856A5967D58A9B96C /* SnapshotManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotManager.swift; sourceTree = "<group>"; };
+		4D66631358860C3FFBB5FFA7 /* Snapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Snapshot.swift; sourceTree = "<group>"; };
 		4E7043FFBF44189BD8C41198 /* VirtualAndroidApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualAndroidApp.swift; sourceTree = "<group>"; };
 		5AEDE463D118D3ABD1A746FB /* VMController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VMController.swift; sourceTree = "<group>"; };
 		5C156C51494F31D729C8695F /* RealBootUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealBootUITests.swift; sourceTree = "<group>"; };
@@ -83,6 +86,7 @@
 		B93BCB793456B312A3CA6071 /* StubEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StubEngine.swift; sourceTree = "<group>"; };
 		BEF619F6803FBA95E3EA9D4C /* VARingBuffer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VARingBuffer.h; sourceTree = "<group>"; };
 		C0AEB2D0D71B3AF24B6B4999 /* HapticsBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HapticsBridge.swift; sourceTree = "<group>"; };
+		D27F102F4F65EC47DD1AE88D /* FrameImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameImage.swift; sourceTree = "<group>"; };
 		DF2F857D69D195CCA74DA404 /* VirtualAndroid.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VirtualAndroid.entitlements; sourceTree = "<group>"; };
 		E0BB360572329D0B77B296BD /* LocationBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationBridge.swift; sourceTree = "<group>"; };
 		E0E6B20776EF56653947C0C6 /* MotionBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionBridge.swift; sourceTree = "<group>"; };
@@ -169,6 +173,7 @@
 			children = (
 				71AAECD13BE1465A01A256FC /* DisplayContainer.swift */,
 				A13A7C848952714EDE173079 /* DisplayGeometry.swift */,
+				D27F102F4F65EC47DD1AE88D /* FrameImage.swift */,
 				2FCA81FECD888DC17CB086DF /* MetalDisplayView.swift */,
 				B2CBE08EC6FFC826E03B1F6B /* Shaders.metal */,
 			);
@@ -192,7 +197,8 @@
 				6F1531474E45B03BE54E5CE7 /* BootConfig.swift */,
 				9B8DDA5F0759694FFC108E05 /* QemuArguments.swift */,
 				09CF32C012D3E489C68B8163 /* QMPClient.swift */,
-				051BF7C63D2D1F7FAE2646C9 /* SnapshotStore.swift */,
+				4D66631358860C3FFBB5FFA7 /* Snapshot.swift */,
+				3AEA097856A5967D58A9B96C /* SnapshotManager.swift */,
 				5AEDE463D118D3ABD1A746FB /* VMController.swift */,
 				F7EEB024F237017E3FB9648D /* VMStorage.swift */,
 			);
@@ -346,6 +352,7 @@
 				F71AFEE42AB0B684DE3C6221 /* DisplayContainer.swift in Sources */,
 				12BEB44215D3D9AD86FBF617 /* DisplayGeometry.swift in Sources */,
 				BDAFDA44DC31F0A020293282 /* Engine.swift in Sources */,
+				7B163896DE6637D17F6D8A86 /* FrameImage.swift in Sources */,
 				2939CD2A2F11668F3F532C58 /* HapticsBridge.swift in Sources */,
 				904B41C6D5D4A4B33D7CE8C9 /* HomeView.swift in Sources */,
 				ACA6C05C1CAEE01E98CAE626 /* HostBridge.swift in Sources */,
@@ -358,7 +365,8 @@
 				13E06823004CFC013C1CADF1 /* QemuArguments.swift in Sources */,
 				2CDF2F2870D4561F5B76359C /* QemuEngine.swift in Sources */,
 				C6406351C43E01AFA8157560 /* Shaders.metal in Sources */,
-				8DDD568B3337CDF0553C6A17 /* SnapshotStore.swift in Sources */,
+				4D7C3312F356362908BE8376 /* Snapshot.swift in Sources */,
+				4AA9E3B2CB8B3A8CCAB2F401 /* SnapshotManager.swift in Sources */,
 				134EE4006C80A141DD1A5505 /* StubEngine.swift in Sources */,
 				28884D22C60CE8E6F14BE1C1 /* VAEngineRuntime.m in Sources */,
 				F061E6E23E66C59A62EEE353 /* VARingBuffer.c in Sources */,

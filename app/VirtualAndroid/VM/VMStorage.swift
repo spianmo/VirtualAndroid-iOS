@@ -9,7 +9,10 @@ import Foundation
 ///         encryptionkey.img|.qcow2 userdata.qcow2 cache.qcow2 manifest.json
 ///       vms/default/                      the VM's writable state
 ///         encryptionkey.(img|qcow2) userdata.qcow2 cache.qcow2 initrd
-///         serial.log hvc0.log logcat.log snapshot.json
+///         serial.log hvc0.log logcat.log
+///         snapshot/                       M4 (docs/SNAPSHOT.md): ram.img (guest RAM,
+///                                         file-backed, shared) state.bin gfx/
+///                                         manifest.json last-frame.png
 ///
 /// The "image pack" is a folder with the image files (see app/README.md);
 /// userdata/cache must be freshly formatted ext4 qcow2s made on macOS by
@@ -41,7 +44,15 @@ struct VMStorage {
     var serialLog: URL { vmDir.appendingPathComponent("serial.log") }
     var hvc0Log: URL { vmDir.appendingPathComponent("hvc0.log") }
     var logcatLog: URL { vmDir.appendingPathComponent("logcat.log") }
-    var snapshotMetadata: URL { vmDir.appendingPathComponent("snapshot.json") }
+
+    // Snapshot (M4).
+    var snapshotDir: URL { vmDir.appendingPathComponent("snapshot", isDirectory: true) }
+    var ramImage: URL { snapshotDir.appendingPathComponent("ram.img") }
+    var stateBin: URL { snapshotDir.appendingPathComponent("state.bin") }
+    var stateTmp: URL { snapshotDir.appendingPathComponent("state.tmp") }
+    var snapshotManifest: URL { snapshotDir.appendingPathComponent("manifest.json") }
+    var lastFrame: URL { snapshotDir.appendingPathComponent("last-frame.png") }
+    var snapshotGfxDir: URL { snapshotDir.appendingPathComponent("gfx", isDirectory: true) }
 
     /// Files an image pack must contain. Either name of each tuple is accepted.
     static let requiredPackFiles: [[String]] = [

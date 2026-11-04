@@ -72,6 +72,64 @@ final class QMPClient {
         }
     }
 
+    /// Runs commands one after another; stops at the first error.
+    /// Completion on the QMP queue.
+    func run(_ commands: [SnapshotProtocol.Command], completion: @escaping (Error?) -> Void) {
+        guard let first = commands.first else { completion(nil); return }
+        execute(first.execute, arguments: first.jsonArguments) { [weak self] result in
+            switch result {
+            case .failure(let e):
+                completion(QMPError.remote("\(first.execute): \(e.localizedDescription)"))
+            case .success:
+                guard let self else { completion(QMPError.closed); return }
+                self.run(Array(commands.dropFirst()), completion: completion)
+            }
+        }
+    }
+
+    /// Polls until the migration finished. Outgoing: `query-migrate` status
+    /// "completed" (runstate postmigrate). Incoming: "completed", or the
+    /// runstate left "inmigrate". Completion on the QMP queue.
+    func pollMigration(incoming: Bool, interval: TimeInterval = 0.02, timeout: TimeInterval,
+                       completion: @escaping (Result<Void, Error>) -> Void) {
+        let deadline = Date().addingTimeInterval(timeout)
+        func again() {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + interval) { poll() }
+        }
+        func poll() {
+            execute("query-migrate") { [weak self] result in
+                guard let self else { completion(.failure(QMPError.closed)); return }
+                switch result {
+                case .failure(let e):
+                    completion(.failure(e))
+                case .success(let reply):
+                    switch SnapshotProtocol.status(fromQueryMigrate: reply as? [String: Any]) {
+                    case .completed:
+                        completion(.success(()))
+                    case .failed(let why):
+                        completion(.failure(QMPError.remote("migration failed: \(why)")))
+                    case .inProgress(let status):
+                        if Date() > deadline {
+                            completion(.failure(QMPError.remote("migration timed out (\(status))")))
+                        } else if incoming && status == "none" {
+                            self.execute("query-status") { r in
+                                if case .success(let st) = r, let run = (st as? [String: Any])?["status"] as? String,
+                                   run != "inmigrate" && run != "prelaunch" {
+                                    completion(.success(()))
+                                } else {
+                                    again()
+                                }
+                            }
+                        } else {
+                            again()
+                        }
+                    }
+                }
+            }
+        }
+        poll()
+    }
+
     /// Convenience for HMP-only commands (savevm/loadvm/info ...).
     func human(_ commandLine: String, completion: Completion? = nil) {
         execute("human-monitor-command", arguments: ["command-line": commandLine], completion: completion)

@@ -4,7 +4,9 @@ import CoreGraphics
 import Foundation
 
 var failures = 0
+var checks = 0
 func check(_ cond: @autoclosure () -> Bool, _ msg: String, line: Int = #line) {
+    checks += 1
     if !cond() { failures += 1; print("FAIL (line \(line)): \(msg)") }
 }
 
@@ -67,6 +69,17 @@ b.gfxLib = "/a,b/va_gfx"
 check(b.build().contains("ranchu,gfx-lib=/a,,b/va_gfx"), "gfx-lib escaped")
 b.graphics = false
 check(b.build().contains("ranchu,gfx=off"), "gfx off")
+b.graphics = true
+b.gfxLib = nil
+b.ramFile = "/S/snap/ram.img"
+b.snapshotDir = "/S/snap"
+b.incomingDefer = true
+let snapArgv = b.build()
+check(snapArgv[snapArgv.firstIndex(of: "-M")! + 1] == "ranchu,snapshot-dir=/S/snap,memory-backend=ram0", "snapshot machine props: \(snapArgv[snapArgv.firstIndex(of: "-M")! + 1])")
+check(snapArgv.contains("memory-backend-file,id=ram0,size=2048M,mem-path=/S/snap/ram.img,share=on"), "file-backed RAM")
+check(snapArgv.suffix(3) == ["-S", "-incoming", "defer"] || snapArgv.contains("defer"), "incoming defer")
+b.incomingDefer = false
+check(SnapshotHash.argvHash(snapArgv, replacing: []) == SnapshotHash.argvHash(b.build(), replacing: []), "restore argv hashes like the cold-boot argv")
 check(QemuArgumentBuilder.escape("/a,b") == "/a,,b", "comma escape")
 check(AccelMode.tcti.qemuValue == "tcg,thread=multi,tb-size=512", "tcti accel")
 
@@ -79,5 +92,201 @@ check(LinuxKeymap.keycode(forHIDUsage: 0x52) == 103, "Up")
 check(LinuxKeymap.keycode(forHIDUsage: 0xE3) == 125, "Left GUI")
 check(LinuxKeymap.keycode(forHIDUsage: 0x80) == 115, "Volume up")
 
-print(failures == 0 ? "all pure-logic checks passed" : "\(failures) failure(s)")
+
+// MARK: Snapshot manifest / validity / launch plan / lifecycle (M4)
+do {
+    let id = SnapshotIdentity(engine: "e1", gfx: "g1", image: "i1", argvHash: "a1")
+    var m = SnapshotManifest(version: SnapshotManifest.currentVersion, engine: "e1", gfx: "g1", image: "i1",
+                             argvHash: "a1", clean: true, savedAt: Date(timeIntervalSince1970: 1_800_000_000),
+                             guestBootCompleted: true, appVersion: "0.1.0", suspendMillis: 230)
+    // JSON field names per docs/SNAPSHOT.md, round trip.
+    let json = String(decoding: try m.encoded(), as: UTF8.self)
+    for key in ["\"version\"", "\"engine\"", "\"gfx\"", "\"image\"", "\"argv_hash\"", "\"clean\"", "\"saved_at\""] {
+        check(json.contains(key), "manifest key \(key)")
+    }
+    check(json.contains("2027-01-15T08:00:00Z"), "saved_at ISO8601: \(json)")
+    check(SnapshotManifest.decode(Data(json.utf8)) == m, "manifest round trip")
+    check(SnapshotManifest.decode(Data("{\"version\":1}".utf8)) == nil, "incomplete manifest rejected")
+
+    let files = SnapshotFiles(stateBinBytes: 94 << 20, ramImgBytes: 2 << 30, expectedRamBytes: 2 << 30, hasLastFrame: true)
+    check(SnapshotValidator.validate(manifest: m, identity: id, files: files) == .valid, "valid snapshot")
+    check(SnapshotValidator.validate(manifest: nil, identity: id, files: files) != .valid, "no manifest")
+    var dirty = m; dirty.clean = false
+    check(SnapshotValidator.validate(manifest: dirty, identity: id, files: files) != .valid, "dirty invalid")
+    for (k, v) in [("engine", "e2"), ("gfx", "g2"), ("image", "i2"), ("argv", "a2")] {
+        var other = id
+        switch k {
+        case "engine": other.engine = v
+        case "gfx": other.gfx = v
+        case "image": other.image = v
+        default: other.argvHash = v
+        }
+        check(SnapshotValidator.validate(manifest: m, identity: other, files: files) != .valid, "\(k) mismatch invalid")
+    }
+    var noState = files; noState.stateBinBytes = 0
+    check(SnapshotValidator.validate(manifest: m, identity: id, files: noState) != .valid, "missing state.bin")
+    var badRam = files; badRam.ramImgBytes = 1 << 30
+    check(SnapshotValidator.validate(manifest: m, identity: id, files: badRam) != .valid, "ram size mismatch")
+    var noDisks = files; noDisks.disksPresent = false
+    check(SnapshotValidator.validate(manifest: m, identity: id, files: noDisks) != .valid, "disks missing")
+    var oldVersion = m; oldVersion.version = 0
+    check(SnapshotValidator.validate(manifest: oldVersion, identity: id, files: files) != .valid, "version mismatch")
+    m.clean = true
+
+    // Launch plan.
+    check(LaunchPlan.decide(snapshotsEnabled: true, engineSupportsSnapshots: true, manifest: m, validity: .valid) == .restore, "plan restore")
+    if case .coldBoot(let discard, _) = LaunchPlan.decide(snapshotsEnabled: true, engineSupportsSnapshots: true, manifest: dirty, validity: .invalid("x")) {
+        check(discard, "dirty snapshot discarded")
+    } else { check(false, "dirty -> cold boot") }
+    if case .coldBoot(let discard, _) = LaunchPlan.decide(snapshotsEnabled: true, engineSupportsSnapshots: true, manifest: nil, validity: .invalid("none")) {
+        check(!discard, "nothing to discard")
+    } else { check(false, "none -> cold boot") }
+    if case .coldBoot = LaunchPlan.decide(snapshotsEnabled: false, engineSupportsSnapshots: true, manifest: m, validity: .valid) {} else { check(false, "disabled -> cold boot") }
+    if case .coldBoot = LaunchPlan.decide(snapshotsEnabled: true, engineSupportsSnapshots: false, manifest: m, validity: .valid) {} else { check(false, "unsupported -> cold boot") }
+
+    // Lifecycle: invariant "never cont on a clean snapshot without markDirty first".
+    func assertInvariant(_ actions: [VMLifecycle.Action], cleanBefore: Bool, _ msg: String) {
+        if let c = actions.firstIndex(of: .cont), cleanBefore {
+            check(actions.firstIndex(of: .markDirty).map { $0 < c } ?? false, "markDirty before cont: \(msg) \(actions)")
+        }
+    }
+    typealias A = VMLifecycle.Action
+    // 1. Cold boot, background, foreground (process alive).
+    var lc = VMLifecycle()
+    check(lc.handle(.launch(.coldBoot(discard: true, reason: "x"))) == [.discardSnapshot, .startColdBoot], "cold boot actions")
+    check(lc.handle(.bootCompleted) == [], "no snapshot after first boot (by design)")
+    check(lc.state == .running, "running after boot")
+    check(lc.handle(.enterBackground(canSnapshot: true, keepRunning: false)) == [.pause, .suspend], "suspend on background")
+    check(lc.state == .suspending, "suspending")
+    check(lc.handle(.suspendSaved) == [.finalizeSnapshot], "finalize")
+    check(lc.state == .suspended && lc.snapshotClean, "suspended clean")
+    var acts = lc.handle(.enterForeground)
+    check(acts == [.markDirty, .cont], "foreground: markDirty then cont, got \(acts)")
+    check(lc.state == .running && !lc.snapshotClean, "running dirty")
+
+    // 2. Restore path (cold launch with a valid snapshot).
+    lc = VMLifecycle()
+    check(lc.handle(.launch(.restore)) == [.showLastFrame, .startRestore], "restore actions")
+    check(lc.state == .restoring, "restoring")
+    acts = lc.handle(.restoreLoaded)
+    assertInvariant(acts, cleanBefore: true, "restore")
+    check(acts == [.markDirty, .cont], "restore -> markDirty, cont")
+    check(lc.state == .running, "running after restore")
+
+    // 3. Restore failure -> discard + relaunch needed.
+    lc = VMLifecycle()
+    lc.handle(.launch(.restore))
+    acts = lc.handle(.restoreFailed("bad state"))
+    check(acts.first == .discardSnapshot && acts.contains(where: { if case .requireRelaunch = $0 { return true }; return false }), "restore failure actions \(acts)")
+    if case .failed = lc.state {} else { check(false, "failed state") }
+
+    // 4. Background while restoring: loaded but not run -> stays clean, suspended.
+    lc = VMLifecycle()
+    lc.handle(.launch(.restore))
+    lc.handle(.enterBackground(canSnapshot: true, keepRunning: false))
+    check(lc.handle(.restoreLoaded) == [], "loaded in background: do not run")
+    check(lc.state == .suspended && lc.snapshotClean, "still clean")
+    check(lc.handle(.enterForeground) == [.markDirty, .cont], "then foreground runs")
+
+    // 5. Foreground while the suspend is still writing.
+    lc = VMLifecycle()
+    lc.handle(.launch(.coldBoot(discard: false, reason: "")))
+    lc.handle(.bootCompleted)
+    lc.handle(.enterBackground(canSnapshot: true, keepRunning: false))
+    check(lc.handle(.enterForeground) == [], "foreground during suspend waits")
+    acts = lc.handle(.suspendSaved)
+    check(acts == [.finalizeSnapshot, .markDirty, .cont], "finish suspend then resume: \(acts)")
+    check(lc.state == .running && !lc.snapshotClean, "running after late resume")
+
+    // 6. Suspend fails -> discard; foreground -> plain cont.
+    lc = VMLifecycle()
+    lc.handle(.launch(.coldBoot(discard: false, reason: "")))
+    lc.handle(.enterBackground(canSnapshot: true, keepRunning: false))
+    check(lc.handle(.suspendFailed("io")) == [.discardSnapshot], "suspend failure discards")
+    check(lc.state == .pausedInBackground, "paused without snapshot")
+    check(lc.handle(.enterForeground) == [.cont], "plain cont")
+
+    // 7. Snapshots off: pause/cont; keepRunning: nothing.
+    lc = VMLifecycle()
+    lc.handle(.launch(.coldBoot(discard: false, reason: "")))
+    check(lc.handle(.enterBackground(canSnapshot: false, keepRunning: false)) == [.pause], "pause only")
+    check(lc.handle(.enterForeground) == [.cont], "cont")
+    check(lc.handle(.enterBackground(canSnapshot: true, keepRunning: true)) == [], "keep running in background")
+    check(lc.state == .running, "still running")
+
+    // 8. User paused, then background/foreground: stays paused, snapshot clean until resume.
+    lc = VMLifecycle()
+    lc.handle(.launch(.coldBoot(discard: false, reason: "")))
+    lc.handle(.bootCompleted)
+    check(lc.handle(.userPause) == [.pause], "user pause")
+    check(lc.handle(.enterBackground(canSnapshot: true, keepRunning: false)) == [.suspend], "already stopped: suspend only")
+    lc.handle(.suspendSaved)
+    check(lc.handle(.enterForeground) == [], "stays paused")
+    check(lc.state == .userPaused && lc.snapshotClean, "user paused, clean")
+    check(lc.handle(.userResume) == [.markDirty, .cont], "user resume marks dirty")
+
+    // 9. Discard while idle; engine stop.
+    lc = VMLifecycle()
+    check(lc.handle(.discardSnapshot) == [.discardSnapshot], "discard idle")
+    lc.handle(.launch(.restore))
+    lc.handle(.restoreLoaded)
+    lc.handle(.engineStopped)
+    check(lc.state == .stopped, "stopped")
+
+    // 10. Exhaustive-ish: random event sequences never cont on a clean snapshot.
+    var rng = SystemRandomNumberGenerator()
+    let events: [VMLifecycle.Event] = [.bootCompleted, .restoreLoaded, .enterBackground(canSnapshot: true, keepRunning: false),
+                                       .enterBackground(canSnapshot: false, keepRunning: false), .suspendSaved,
+                                       .suspendFailed("x"), .enterForeground, .userPause, .userResume, .discardSnapshot]
+    for _ in 0..<2000 {
+        var l = VMLifecycle()
+        l.handle(.launch(Bool.random(using: &rng) ? .restore : .coldBoot(discard: true, reason: "")))
+        for _ in 0..<20 {
+            let clean = l.snapshotClean
+            let a = l.handle(events.randomElement(using: &rng)!)
+            assertInvariant(a, cleanBefore: clean, "random")
+            if a.contains(.cont) { check(!l.snapshotClean, "clean after cont") }
+        }
+    }
+
+    // QMP protocol sequence (docs/SNAPSHOT.md).
+    let sus = SnapshotProtocol.suspend(stateTmp: "/a b/state.tmp")
+    check(sus.map(\.execute) == ["stop", "migrate-set-parameters", "migrate-set-capabilities", "migrate"], "suspend sequence")
+    check((sus[1].jsonArguments?["mode"] as? String) == "cpr-reboot", "cpr-reboot")
+    let caps = sus[2].jsonArguments?["capabilities"] as? [[String: Any]]
+    check(caps?.first?["capability"] as? String == "x-ignore-shared" && caps?.first?["state"] as? Bool == true, "x-ignore-shared")
+    let ch = (sus[3].jsonArguments?["channels"] as? [[String: Any]])?.first
+    let addr = ch?["addr"] as? [String: Any]
+    check(ch?["channel-type"] as? String == "main" && addr?["transport"] as? String == "file" && addr?["filename"] as? String == "/a b/state.tmp", "file channel")
+    check(JSONSerialization.isValidJSONObject(sus[3].jsonArguments!), "json-serializable")
+    let res = SnapshotProtocol.restore(stateBin: "/s/state.bin")
+    check(res.map(\.execute) == ["migrate-set-parameters", "migrate-set-capabilities", "migrate-incoming"], "restore sequence")
+    check(res[2].jsonArguments?["exit-on-error"] as? Bool == false, "incoming does not exit on error")
+    check(SnapshotProtocol.status(fromQueryMigrate: ["status": "completed"]) == .completed, "status completed")
+    check(SnapshotProtocol.status(fromQueryMigrate: ["status": "failed", "error-desc": "boom"]) == .failed("boom"), "status failed")
+    check(SnapshotProtocol.status(fromQueryMigrate: ["status": "active"]) == .inProgress("active"), "status active")
+
+    // argv hash: stable across container moves, fd numbers, -incoming/-S.
+    let a1 = ["-M", "ranchu,snapshot-dir=/C1/snap", "-chardev", "socket,id=qmp0,fd=7", "-mon", "chardev=qmp0,mode=control", "-m", "2048"]
+    let a2 = ["-M", "ranchu,snapshot-dir=/C2/snap", "-chardev", "socket,id=qmp0,fd=9", "-mon", "chardev=qmp0,mode=control", "-m", "2048", "-S", "-incoming", "defer"]
+    check(SnapshotHash.argvHash(a1, replacing: [("/C1", "$ROOT")]) == SnapshotHash.argvHash(a2, replacing: [("/C2", "$ROOT")]), "argv hash normalized")
+    check(SnapshotHash.argvHash(a1, replacing: []) != SnapshotHash.argvHash(a1.map { $0 == "2048" ? "4096" : $0 }, replacing: []), "argv hash sensitive")
+
+    // Image identity: content of small files and size/mtime of large ones.
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("va-snap-test-\(getpid())")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let big = dir.appendingPathComponent("system.img"), small = dir.appendingPathComponent("initrd")
+    try Data(repeating: 1, count: 1000).write(to: big)
+    try Data("abc".utf8).write(to: small)
+    let i1 = SnapshotHash.imageIdentity(files: [big], contentFiles: [small])
+    check(i1 == SnapshotHash.imageIdentity(files: [big], contentFiles: [small]), "image identity stable")
+    try Data("abd".utf8).write(to: small)
+    check(i1 != SnapshotHash.imageIdentity(files: [big], contentFiles: [small]), "initrd change detected")
+    check(SnapshotHash.imageIdentity(files: [big], contentFiles: [], extra: ["boot=a"]) != SnapshotHash.imageIdentity(files: [big], contentFiles: [], extra: ["boot=b"]), "bootconfig change detected")
+    try? FileManager.default.removeItem(at: dir)
+} catch {
+    check(false, "snapshot tests threw \(error)")
+}
+
+print(failures == 0 ? "all \(checks) pure-logic checks passed" : "\(failures) of \(checks) checks failed")
 exit(failures == 0 ? 0 : 1)

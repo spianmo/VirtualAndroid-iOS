@@ -85,7 +85,7 @@ port of `tools/make_initrd.py`), with `androidboot.opengles.version` from
 for ANGLE Metal otherwise). QEMU argv (`VM/QemuArguments.swift`) mirrors
 `tools/run-macos.sh --machine ranchu`: `-M ranchu,gfx-lib=...` (override
 `-VAMachine virt`), cortex-a76, 4 vCPU, 2 GB, disks vendor/encrypt/userdata/
-cache/system in that order (writable ones qcow2 so `savevm` works), virtio net
+cache/system in that order (writable ones qcow2), virtio net
 (no slirp adb forward on ranchu), rng, virtio-serial hvc0/hvc1 (logcat) into
 files, `-device va-vsock-pci,guest-cid=77,adb-port=<port>,pipe-port=5000`
 (adbd and the clipboard service talk vsock), QMP. adb: port 5570 on the
@@ -96,10 +96,55 @@ off on devices unless `-VAAdbPort N`. Bootconfig: `opengles.version=196608`
 image pack's copy, which `make_userdata_qcow2.sh --pack` takes from
 `~/.android/adbkey.pub`; `VA_NO_ADBKEY=1` for packs you give away).
 
-Snapshot placeholder (M4, `VM/SnapshotStore.swift`): "Quick boot" saves
-`savevm va-quickboot` after the first boot and boots with `-loadvm` when the
-image/config fingerprint matches. Needs vmstate for the goldfish devices and
-gfx pipes before it can work with QEMU; the stub simulates it.
+## M4 fast resume (snapshots; docs/SNAPSHOT.md)
+
+Files: `VM/Snapshot.swift` (pure: manifest, validity, launch plan, lifecycle
+state machine, QMP sequences, hashing; unit-tested), `VM/SnapshotManager.swift`
+(files), `Display/FrameImage.swift` (last-frame.png), engine `suspend()` /
+restore in `Engine/QemuEngine.swift` and `Engine/StubEngine.swift`.
+
+* Snapshot mode argv: `-object memory-backend-file,id=ram0,size=2048M,mem-path=<vm>/snapshot/ram.img,share=on`,
+  `-M ranchu,...,snapshot-dir=<vm>/snapshot,memory-backend=ram0`; restore adds
+  `-S -incoming defer`. Enabled when "Fast resume" is on and the embedded QEMU
+  has the ranchu `snapshot-dir` property (probed in the binary;
+  `-VASnapshotSupport YES|NO` overrides).
+* Background (`beginBackgroundTask`): QMP `stop` -> `migrate-set-parameters
+  mode=cpr-reboot` -> `migrate-set-capabilities x-ignore-shared` -> `migrate`
+  (file channel `state.tmp`) -> poll `query-migrate` until completed
+  (postmigrate) -> rename to `state.bin` -> `last-frame.png` -> `manifest.json`
+  `{version, engine, gfx, image, argv_hash, clean: true, saved_at}`. QEMU stays
+  alive. Host events (touch, keys, sensors, GNSS, battery, clipboard) are not
+  forwarded while the guest is stopped, so the saved RAM/state cannot change.
+* Foreground with QEMU alive: manifest `clean=false`, then `cont` (instant).
+* Cold launch with a valid manifest (clean, same engine/gfx/image/argv hash,
+  state.bin and 2 GB ram.img and disks present): show `last-frame.png` under a
+  "Restoring…" overlay, start QEMU with `-S -incoming defer`, same
+  parameter/capability, `migrate-incoming` (`exit-on-error=false`), poll, then
+  `clean=false` and `cont`. Anything invalid -> discard snapshot (incl. ram.img)
+  and cold boot. A failed load cannot fall back in-process (QEMU runs once per
+  process): the snapshot is discarded and the app asks to be relaunched.
+* **Snapshots are taken only when leaving the app**, never "right after the
+  first boot, then keep running": RAM (ram.img) and disks change in place as
+  soon as the guest runs, so such a snapshot would be inconsistent by the time
+  it is used. The manifest is clean only between a suspend and the next
+  `cont`; a kill while running means a cold boot (like pulling the power).
+* Hashes: engine = SHA-256 of the QEMU binary, gfx = va_gfx + GLESv2, image =
+  name/size/mtime of kernel/ramdisk/system/vendor + pack manifest + bootconfig,
+  argv = machine-defining argv with container/bundle paths normalized and the
+  QMP fd/-S/-incoming removed (binary hashes are cached by size+mtime).
+* Settings: "Fast resume" toggle, snapshot info, "Discard snapshot / cold boot
+  next time"; VM menu: "Cold boot (discard snapshot)".
+* `app/scripts/m4_e2e.sh [--stub] [--rounds N]`: launch -> interactive,
+  background -> suspend, `simctl terminate`, relaunch -> times (log lines
+  `restore: last frame shown / state loaded / guest running / first live frame +N ms`
+  since process start; QEMU: adb focus on Launcher3).
+
+Measured 2026-11-04 (simulator): stub: suspend 0.1 s, relaunch -> live 0.6 s.
+Real QEMU with `-M virt` (no graphics; `-VAMachine virt -VASnapshotSupport YES`):
+suspend `migrate` 50-73 ms (state.bin 441 KB, ram.img 1.3 GB allocated),
+relaunch -> state loaded in 158 ms, guest running +750 ms after process start,
+kernel log continues where it stopped; background -> foreground `cont` after
+postmigrate works. ranchu + gfx pending (board/gfx snapshot halves).
 
 ## Display, rotation, input
 
@@ -172,7 +217,7 @@ Screenshots: `docs/screenshot-real-boot.png`, `docs/screenshot-real-home.png`,
 `-VASelfTest YES` (injects two touches + VOL+/BACK after boot),
 `-VAStubDiagnostics gnss,camera,mic,tone,sensors,vibrate,copy` (stub: simulate
 guest requests after boot and log every bridge's status 6 s later),
-`-VASimulatorMic YES`, `-VAAdbPort N`, `-VATrace event,...`, `-VADumpFrames YES`
+`-VASimulatorMic YES`, `-VASnapshotSupport YES|NO`, `-VAFastResume NO`, `-VAAdbPort N`, `-VATrace event,...`, `-VADumpFrames YES`
 (libva_gfx PNG dumps in vms/default/frames), `-VAScript "wait:5;tap:0.31,0.74;key:172"`
 (after boot: guest-coordinate taps through the view mapping, keys). Pre-grant simulator permissions with
 `xcrun simctl privacy <udid> grant location|camera|microphone|motion dev.virtualandroid.app`

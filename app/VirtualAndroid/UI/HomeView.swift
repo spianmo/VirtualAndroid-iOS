@@ -27,9 +27,13 @@ struct HomeView: View {
                             .font(.headline)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(vm.phase == .installing || (vm.resolvedEngineKind == .qemu && !vm.imageInstalled))
+                    .disabled(vm.phase == .installing || vm.relaunchRequired ||
+                              (vm.resolvedEngineKind == .qemu && !vm.imageInstalled))
                     if let err = vm.lastError {
                         Text(err).font(.footnote).foregroundStyle(.red)
+                    }
+                    if vm.relaunchRequired {
+                        Button("Quit VirtualAndroid (reopen to cold boot)", role: .destructive) { vm.quitApp() }
                     }
                 }
 
@@ -71,10 +75,17 @@ struct HomeView: View {
 
                 Section("Options") {
                     Toggle("Start automatically on launch", isOn: $vm.autoBoot)
-                    Toggle("Quick boot from snapshot (experimental)", isOn: $vm.quickBoot)
+                    Toggle("Fast resume (snapshot when leaving the app)", isOn: $vm.fastResume)
+                    if !vm.engineSupportsSnapshots(vm.resolvedEngineKind) {
+                        Text("This engine build has no snapshot support yet; cold boots only.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     if let info = vm.snapshotInfo {
                         LabeledContent("Snapshot", value: info).font(.footnote)
-                        Button("Delete snapshot", role: .destructive) { vm.deleteSnapshot() }
+                        Button("Discard snapshot / cold boot next time", role: .destructive) { vm.discardSnapshot() }
+                    }
+                    if let t = vm.restoreTimings {
+                        LabeledContent("Last restore", value: t).font(.footnote)
                     }
                     Picker("Rotation", selection: $vm.rotationMode) {
                         ForEach(DisplayRotationMode.allCases) { Text($0.label).tag($0) }

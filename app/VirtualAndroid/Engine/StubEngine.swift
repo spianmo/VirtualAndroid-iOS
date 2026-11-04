@@ -26,7 +26,24 @@ protocol StubDiagnostics: AnyObject {
 final class StubEngine: VMEngine, StubDiagnostics {
     let displayName = "Stub"
     weak var delegate: EngineDelegate?
-    let supportsSnapshots = true
+
+    /// Snapshot identity of the stub (its "state.bin" is a small JSON file).
+    static func snapshotIdentity(config: VMLaunchConfig) -> SnapshotIdentity {
+        let app = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return SnapshotIdentity(engine: "stub-v1-\(app)", gfx: "none", image: "stub",
+                                argvHash: SnapshotHash.sha256(strings: ["\(config.displayWidth)x\(config.displayHeight)",
+                                                                        "\(config.displayDPI)", "\(config.memoryMB)"]))
+    }
+
+    private struct SavedState: Codable {
+        var elapsed: Double
+        var frameNumber: UInt64
+        var bootCompleted: Bool
+        var volume: Int
+        var screenOn: Bool
+        var keyLog: [String]
+    }
+    private var pausedAt: Double?
 
     private let queue = DispatchQueue(label: "va.stub", qos: .userInteractive)
     private var cb = VaHostCallbacks()
@@ -94,22 +111,72 @@ final class StubEngine: VMEngine, StubDiagnostics {
         surfaces = (0..<3).compactMap { _ in Self.makeSurface(width: width, height: height) }
         guard surfaces.count == 3 else { throw EngineError.startFailed("IOSurfaceCreate failed") }
         startTime = CACurrentMediaTime()
-        if config.restoreSnapshotTag != nil {
-            bootDuration = 0.3     // "restored from snapshot": straight to the home screen
-        }
         guestLog(1, "stub engine: \(width)x\(height)@\(config.displayDPI)dpi, \(config.memoryMB) MB, \(config.cpuCount) vCPU")
-        setGuestState(VA_GUEST_BOOTING)
         let t = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
         t.schedule(deadline: .now(), repeating: .nanoseconds(16_666_667), leeway: .milliseconds(1))
         t.setEventHandler { [weak self] in self?.tick() }
-        t.resume()
         timer = t
+        if let stateFile = config.restoreStateFile {
+            // Restore: load, stay paused until resume() (like QEMU -incoming + -S).
+            paused = true
+            pausedAt = CACurrentMediaTime()
+            queue.asyncAfter(deadline: .now() + 0.15) { [self] in
+                do {
+                    let s = try JSONDecoder().decode(SavedState.self, from: Data(contentsOf: stateFile))
+                    startTime = pausedAt! - s.elapsed
+                    frameNumber = s.frameNumber
+                    bootCompleted = s.bootCompleted
+                    volume = s.volume
+                    screenOn = s.screenOn
+                    keyLog = s.keyLog
+                    lastFpsFrame = s.frameNumber
+                    lastFpsTime = CACurrentMediaTime()
+                    if bootCompleted {
+                        // What the engine's services must do after a load: re-apply the
+                        // host-side requests (sensors, GNSS, audio...) in this new process.
+                        cb.sensor_set_enabled?(cb.opaque, VA_SENSOR_ACCELERATION, true, 66)
+                    }
+                    guestLog(1, "stub: restored state (t=\(String(format: "%.1f", s.elapsed)) s, frame \(s.frameNumber))")
+                    DispatchQueue.main.async { self.delegate?.engine(self, restoreFinished: .success(())) }
+                } catch {
+                    DispatchQueue.main.async { self.delegate?.engine(self, restoreFinished: .failure(error)) }
+                }
+            }
+        } else {
+            setGuestState(VA_GUEST_BOOTING)
+            t.resume()
+        }
+    }
+
+    func suspend(stateFile: URL, completion: @escaping (Result<Void, Error>) -> Void) {
+        queue.async { [self] in
+            let t0 = CACurrentMediaTime()
+            if !paused, timer != nil {
+                paused = true
+                pausedAt = t0
+                timer?.suspend()
+            }
+            let s = SavedState(elapsed: (pausedAt ?? t0) - startTime, frameNumber: frameNumber,
+                               bootCompleted: bootCompleted, volume: volume, screenOn: screenOn, keyLog: keyLog)
+            let result: Result<Void, Error> = Result {
+                try JSONEncoder().encode(s).write(to: stateFile)
+                // Stand-in for the file-backed guest RAM, so the snapshot layout
+                // (and its validity check) is the same as with QEMU.
+                let ram = stateFile.deletingLastPathComponent().appendingPathComponent("ram.img")
+                if !FileManager.default.fileExists(atPath: ram.path) {
+                    try Data(count: 4096).write(to: ram)
+                }
+            }
+            guestLog(1, String(format: "stub: suspended in %.0f ms", (CACurrentMediaTime() - t0) * 1000))
+            DispatchQueue.main.async { completion(result) }
+        }
     }
 
     func pause() {
         queue.async { [self] in
             guard !paused, timer != nil else { return }
             paused = true
+            pausedAt = CACurrentMediaTime()
             timer?.suspend()
             setGuestState(VA_GUEST_PAUSED)
         }
@@ -119,6 +186,8 @@ final class StubEngine: VMEngine, StubDiagnostics {
         queue.async { [self] in
             guard paused else { return }
             paused = false
+            if let p = pausedAt { startTime += CACurrentMediaTime() - p }   // guest time froze while paused
+            pausedAt = nil
             timer?.resume()
             setGuestState(bootCompleted ? VA_GUEST_BOOT_COMPLETED : VA_GUEST_BOOTING)
         }
@@ -134,13 +203,6 @@ final class StubEngine: VMEngine, StubDiagnostics {
 
     func forceStop() {
         queue.async { [self] in finish(status: 0) }
-    }
-
-    func saveSnapshot(tag: String, completion: @escaping (Error?) -> Void) {
-        queue.async {
-            self.guestLog(1, "stub: snapshot '\(tag)' saved (simulated)")
-            DispatchQueue.main.async { completion(nil) }
-        }
     }
 
     private func finish(status: Int32) {

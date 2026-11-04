@@ -20,7 +20,13 @@ final class MetalDisplayView: UIView, FrameSink {
     override class var layerClass: AnyClass { CAMetalLayer.self }
     private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
 
-    weak var input: EngineInput?
+    var input: EngineInput? {
+        get { inputEnabled ? inputTarget : nil }
+        set { inputTarget = newValue }
+    }
+    private weak var inputTarget: EngineInput?
+    /// Closed while the guest is stopped (pause/suspend/restore).
+    var inputEnabled = true
     var rotationMode: DisplayRotationMode = .followDevice { didSet { setNeedsLayout() } }
     /// Called (main thread) with the Android surface rotation when the
     /// interface orientation changes.
@@ -48,6 +54,10 @@ final class MetalDisplayView: UIView, FrameSink {
     private var slots: [ObjectIdentifier: Int32] = [:]
 
     private(set) var framesDrawn: UInt64 = 0
+    /// One-shot (main thread): called when the next engine frame is drawn.
+    var onNextFrame: (() -> Void)?
+    /// Frame number of a placeholder (last-frame.png) being shown, if any.
+    private var placeholderNumber: UInt64?
 
     override init(frame: CGRect) {
         device = MTLCreateSystemDefaultDevice()
@@ -97,6 +107,30 @@ final class MetalDisplayView: UIView, FrameSink {
         frameLock.unlock()
     }
 
+    /// Shows a still image (the snapshot's last frame) until the engine
+    /// presents its first frame. Main thread.
+    func showPlaceholder(_ surface: IOSurfaceRef) {
+        let frame = DisplayFrame(surface: surface, width: IOSurfaceGetWidth(surface), height: IOSurfaceGetHeight(surface),
+                                 rotationDegrees: 0, number: UInt64.max)
+        placeholderNumber = frame.number
+        present(frame)
+    }
+
+    /// The most recent frame (main thread), for saving last-frame.png.
+    func latestFrame() -> DisplayFrame? {
+        frameLock.lock()
+        defer { frameLock.unlock() }
+        return pendingFrame ?? currentFrame
+    }
+
+    func clearFrame() {
+        frameLock.lock()
+        pendingFrame = nil
+        frameLock.unlock()
+        currentFrame = nil
+        needsRedraw = true
+    }
+
     // MARK: Lifecycle
 
     override func didMoveToWindow() {
@@ -143,12 +177,18 @@ final class MetalDisplayView: UIView, FrameSink {
 
     fileprivate func tick() {
         frameLock.lock()
+        var engineFrame = false
         if let f = pendingFrame {
             currentFrame = f
             pendingFrame = nil
             needsRedraw = true
+            engineFrame = f.number != placeholderNumber
         }
         frameLock.unlock()
+        if engineFrame, let cb = onNextFrame {
+            onNextFrame = nil
+            cb()
+        }
         guard needsRedraw else { return }
         needsRedraw = false
         draw()

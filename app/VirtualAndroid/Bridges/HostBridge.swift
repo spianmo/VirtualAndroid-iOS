@@ -7,7 +7,11 @@ import Foundation
 /// other way (sensor samples, location, battery, clipboard) are pushed through
 /// `engine` (an `EngineInput`, i.e. the va_engine_* functions).
 final class HostBridge {
-    weak var engine: EngineInput?
+    /// Events go to `engine` only while the guest runs: a suspended snapshot
+    /// (ram.img + state.bin) must not change after it was taken.
+    var engine: EngineInput? { forwarding ? target : nil }
+    weak var target: EngineInput?
+    var forwarding = true
 
     let motion = MotionBridge()
     let location = LocationBridge()

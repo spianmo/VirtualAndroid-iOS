@@ -12,7 +12,6 @@ import IOSurface
 final class QemuEngine: VMEngine {
     let displayName = "QEMU"
     weak var delegate: EngineDelegate?
-    let supportsSnapshots = true
 
     private var runner: VAQemuRunner?
     private var symbols = VAEngineSymbols()
@@ -72,6 +71,74 @@ final class QemuEngine: VMEngine {
     }
 
     static var isAvailable: Bool { selectFramework() != nil }
+
+    static var angleLibraryPath: String? {
+        guard let dir = Bundle.main.privateFrameworksPath else { return nil }
+        let p = "\(dir)/GLESv2.framework/GLESv2"
+        return FileManager.default.fileExists(atPath: p) ? p : nil
+    }
+
+    /// M4: the embedded QEMU knows the ranchu `snapshot-dir` property (the
+    /// board's snapshot support). Probed from the binary's strings because an
+    /// unknown machine property makes QEMU exit. `-VASnapshotSupport YES|NO`
+    /// overrides the probe.
+    static let supportsSnapshots: Bool = {
+        let d = UserDefaults.standard
+        if d.object(forKey: "VASnapshotSupport") != nil { return d.bool(forKey: "VASnapshotSupport") }
+        guard let path = selectFramework()?.path,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .alwaysMapped) else { return false }
+        return data.range(of: Data("snapshot-dir\0".utf8)) != nil
+    }()
+
+    /// The argv (minus the per-launch QMP fd and restore flags) for `config`.
+    static func makeBuilder(config: VMLaunchConfig, storage: VMStorage, accel: AccelMode,
+                            gfx: String?) -> QemuArgumentBuilder {
+        var b = QemuArgumentBuilder(
+            machine: config.machine,
+            accel: accel,
+            cpuCount: config.cpuCount,
+            memoryMB: config.memoryMB,
+            kernel: storage.kernel,
+            initrd: storage.initrd,
+            vendor: DiskImage(url: storage.vendor, format: "raw", readOnly: true),
+            encryption: DiskImage.detect(storage.encryption, readOnly: false),
+            userdata: DiskImage.detect(storage.userdata, readOnly: false),
+            cache: DiskImage.detect(storage.cache, readOnly: false),
+            system: DiskImage(url: storage.system, format: "raw", readOnly: true),
+            serialLog: storage.serialLog,
+            hvc0Log: storage.hvc0Log,
+            logcatLog: storage.logcatLog)
+        b.gfxLib = gfx
+        b.graphics = gfx != nil
+        b.adbHostPort = config.adbPort
+        b.traceEvents = config.traceEvents
+        if config.snapshotMode {
+            b.ramFile = storage.ramImage.path
+            b.snapshotDir = storage.snapshotDir.path
+        }
+        return b
+    }
+
+    /// What a snapshot taken by this app/engine/image/config would record.
+    static func snapshotIdentity(config: VMLaunchConfig) -> SnapshotIdentity? {
+        guard let storage = config.storage, let (path, accel) = selectFramework() else { return nil }
+        let engine = FileHashCache.sha256(URL(fileURLWithPath: path))
+        let gfx = gfxLibraryPath
+        let gfxHash = gfx.map { g in
+            SnapshotHash.sha256(strings: [FileHashCache.sha256(URL(fileURLWithPath: g)),
+                                          angleLibraryPath.map { FileHashCache.sha256(URL(fileURLWithPath: $0)) } ?? "no-angle"])
+        } ?? "none"
+        let boot = BootConfig.parameters(overrides: bootOverrides(config: config))
+            .sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+        let image = SnapshotHash.imageIdentity(
+            files: [storage.kernel, storage.ramdisk, storage.system, storage.vendor],
+            contentFiles: storage.exists(storage.manifest) ? [storage.manifest] : [],
+            extra: boot)
+        let argv = makeBuilder(config: config, storage: storage, accel: accel, gfx: gfx).build()
+        let argvHash = SnapshotHash.argvHash(argv, replacing: [(storage.root.path, "$ROOT"),
+                                                               (Bundle.main.bundlePath, "$BUNDLE")])
+        return SnapshotIdentity(engine: engine, gfx: gfxHash, image: image, argvHash: argvHash)
+    }
 
     /// androidboot.* overrides for this host (bootconfig in the initrd).
     /// androidboot.opengles.version (196608, ANGLE Metal GLES 3.0) and
@@ -137,38 +204,22 @@ final class QemuEngine: VMEngine {
         qmp.start()
         self.qmp = qmp
 
-        var builder = QemuArgumentBuilder(
-            machine: config.machine,
-            accel: accel,
-            cpuCount: config.cpuCount,
-            memoryMB: config.memoryMB,
-            kernel: storage.kernel,
-            initrd: storage.initrd,
-            vendor: DiskImage(url: storage.vendor, format: "raw", readOnly: true),
-            encryption: DiskImage.detect(storage.encryption, readOnly: false),
-            userdata: DiskImage.detect(storage.userdata, readOnly: false),
-            cache: DiskImage.detect(storage.cache, readOnly: false),
-            system: DiskImage(url: storage.system, format: "raw", readOnly: true),
-            serialLog: storage.serialLog,
-            hvc0Log: storage.hvc0Log,
-            logcatLog: storage.logcatLog)
+        var builder = Self.makeBuilder(config: config, storage: storage, accel: accel, gfx: gfx)
         builder.qmpFD = fds[1]
-        builder.loadvmTag = config.restoreSnapshotTag
-        builder.gfxLib = gfx
-        builder.graphics = gfx != nil
-        builder.adbHostPort = config.adbPort
-        builder.traceEvents = config.traceEvents
+        builder.incomingDefer = config.restoreStateFile != nil
         let argv = builder.build()
         log(1, "qemu " + argv.joined(separator: " "))
 
         var env: [String: String] = [:]
         if let dump = config.dumpFramesDir { env["VA_DUMP_FRAMES"] = dump }
 
-        progress = BootProgressTracker(serial: storage.serialLog, logcat: storage.logcatLog) { [weak self] f, msg in
-            guard let self else { return }
-            self.delegate?.engine(self, bootProgress: f, message: msg)
+        if config.restoreStateFile == nil {
+            progress = BootProgressTracker(serial: storage.serialLog, logcat: storage.logcatLog) { [weak self] f, msg in
+                guard let self else { return }
+                self.delegate?.engine(self, bootProgress: f, message: msg)
+            }
+            progress?.start()
         }
-        progress?.start()
 
         do {
             try runner.start(withArguments: argv, environment: env, workingDirectory: storage.vmDir.path) {
@@ -187,29 +238,62 @@ final class QemuEngine: VMEngine {
             progress?.stop()
             throw EngineError.startFailed(error.localizedDescription)
         }
-        guestStateChanged(VA_GUEST_BOOTING)
+        if let state = config.restoreStateFile {
+            restore(from: state, qmp: qmp)
+        } else {
+            guestStateChanged(VA_GUEST_BOOTING)
+        }
+    }
+
+    // MARK: M4 snapshots (docs/SNAPSHOT.md)
+
+    private func restore(from state: URL, qmp: QMPClient) {
+        let t0 = Date()
+        qmp.run(SnapshotProtocol.restore(stateBin: state.path)) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.restoreDone(.failure(error), qmp: qmp)
+                return
+            }
+            qmp.pollMigration(incoming: true, timeout: 120) { result in
+                if case .success = result {
+                    self.log(1, String(format: "restore: state loaded in %.0f ms", Date().timeIntervalSince(t0) * 1000))
+                }
+                self.restoreDone(result, qmp: qmp)
+            }
+        }
+    }
+
+    private func restoreDone(_ result: Result<Void, Error>, qmp: QMPClient) {
+        if case .failure = result {
+            qmp.execute("quit")     // exit-on-error=false kept QEMU alive; stop it cleanly
+        }
+        DispatchQueue.main.async { self.delegate?.engine(self, restoreFinished: result) }
+    }
+
+    func suspend(stateFile: URL, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard let qmp else {
+            completion(.failure(EngineError.unsupported("engine not running")))
+            return
+        }
+        try? FileManager.default.removeItem(at: stateFile)
+        let t0 = Date()
+        let finish: (Result<Void, Error>) -> Void = { result in DispatchQueue.main.async { completion(result) } }
+        qmp.run(SnapshotProtocol.suspend(stateTmp: stateFile.path)) { [weak self] error in
+            if let error { finish(.failure(error)); return }
+            qmp.pollMigration(incoming: false, timeout: 25) { result in
+                if case .success = result {
+                    self?.log(1, String(format: "suspend: migrate completed in %.0f ms", Date().timeIntervalSince(t0) * 1000))
+                }
+                finish(result)
+            }
+        }
     }
 
     func pause() { qmp?.execute("stop") }
     func resume() { qmp?.execute("cont") }
     func requestShutdown() { qmp?.execute("system_powerdown") }
     func forceStop() { qmp?.execute("quit") }
-
-    func saveSnapshot(tag: String, completion: @escaping (Error?) -> Void) {
-        guard let qmp else { completion(EngineError.unsupported("engine not running")); return }
-        // HMP savevm is synchronous and simple; switch to the snapshot-save job for M4.
-        qmp.human("savevm \(tag)") { result in
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let out):
-                    let text = out as? String ?? ""
-                    completion(text.isEmpty ? nil : EngineError.startFailed(text))
-                case .failure(let e):
-                    completion(e)
-                }
-            }
-        }
-    }
 
     // MARK: Events
 

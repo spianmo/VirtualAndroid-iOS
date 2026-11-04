@@ -49,6 +49,9 @@ protocol EngineDelegate: AnyObject {
     func engine(_ engine: VMEngine, bootProgress fraction: Double, message: String)
     func engine(_ engine: VMEngine, didExitWithStatus status: Int32, fatal: Bool, message: String?)
     func engine(_ engine: VMEngine, log level: Int32, message: String)
+    /// Restore (config.restoreStateFile) finished loading; the guest is paused
+    /// and runs only after `resume()`.
+    func engine(_ engine: VMEngine, restoreFinished result: Result<Void, Error>)
 }
 
 /// Everything an engine needs to boot the VM.
@@ -61,7 +64,10 @@ struct VMLaunchConfig {
     var cpuCount = 4
     /// Paths/argv only used by the QEMU engine.
     var storage: VMStorage?
-    var restoreSnapshotTag: String?
+    /// M4: guest RAM in storage.ramImage (shared file) + ranchu snapshot-dir.
+    var snapshotMode = false
+    /// M4: restore from this state file (QEMU: -incoming defer + migrate-incoming).
+    var restoreStateFile: URL?
     /// QEMU machine; "ranchu" (board) or "virt" for frameworks without it.
     var machine = "ranchu"
     /// adb on 127.0.0.1:port (ranchu: va-vsock-pci). Default: 5570 on the
@@ -91,18 +97,18 @@ enum EngineError: LocalizedError {
 protocol VMEngine: EngineInput {
     var displayName: String { get }
     var delegate: EngineDelegate? { get set }
-    /// True if pause/resume/snapshots are implemented by this engine.
-    var supportsSnapshots: Bool { get }
-
     func start(config: VMLaunchConfig, host: HostBridge, frames: FrameSink) throws
+    /// Stop the guest (QMP `stop`).
     func pause()
+    /// Run the guest (QMP `cont`).
     func resume()
+    /// M4 suspend: stop, then save device state to `stateFile` (cpr-reboot,
+    /// x-ignore-shared). The engine stays alive, paused. Completion on main.
+    func suspend(stateFile: URL, completion: @escaping (Result<Void, Error>) -> Void)
     /// ACPI-style power button request (guest shuts down cleanly).
     func requestShutdown()
     /// Hard stop (quit).
     func forceStop()
-    /// M4 placeholder: save the whole machine state under `tag`.
-    func saveSnapshot(tag: String, completion: @escaping (Error?) -> Void)
 }
 
 /// Monotonic host clock used for sensor timestamps (CLOCK_UPTIME_RAW, ns),
