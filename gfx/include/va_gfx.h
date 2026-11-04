@@ -13,6 +13,7 @@
 #define VA_GFX_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -87,6 +88,34 @@ const char *va_gfx_renderer_string(void);
  * (major << 16) | minor. Returns 0 on success.
  */
 int va_gfx_get_gles_version(int *major, int *minor);
+
+/*
+ * ---- Snapshot (M4, see docs/SNAPSHOT.md) ----
+ * The engine calls these from the QEMU main thread with the VM stopped and
+ * the BQL held, as its own migration section that is ordered BEFORE the
+ * goldfish pipe device:
+ *   save: va_gfx_snapshot_save() runs before any graphics pipe's
+ *         AndroidPipeFuncs.save();
+ *   load: va_gfx_snapshot_load() runs before any graphics pipe's
+ *         AndroidPipeFuncs.load(), into a freshly va_gfx_init()ed renderer
+ *         that has not served a guest yet.
+ * Renderer threads may be blocked waiting for the BQL (pipe wakes); the
+ * implementation must not deadlock on that.
+ * Small state goes through io (it lands in the migration stream). Bulk data
+ * (color buffers, textures) may be written as files under aux_dir, which the
+ * engine creates and keeps for exactly as long as the snapshot.
+ * After a successful load, present the last guest frame again (the guest will
+ * not repost until something changes). All return 0 on success, -1 on error;
+ * a failed load leaves the renderer unusable (the engine then cold-boots).
+ */
+typedef struct VaGfxSnapshotIo {
+    void *opaque;
+    int (*write)(void *opaque, const void *buf, size_t len);
+    int (*read)(void *opaque, void *buf, size_t len); /* exactly len bytes */
+} VaGfxSnapshotIo;
+
+int va_gfx_snapshot_save(const VaGfxSnapshotIo *io, const char *aux_dir);
+int va_gfx_snapshot_load(const VaGfxSnapshotIo *io, const char *aux_dir);
 
 void va_gfx_teardown(void);
 
