@@ -32,9 +32,15 @@ def main():
     ap.add_argument("--adb-port", default="5641")
     ap.add_argument("--env", action="append", default=[])
     ap.add_argument("--json")
+    ap.add_argument("--machine", default="virt")
+    ap.add_argument("--watch", default="", help="also stop when this text appears in logcat.log (count:N)")
     ap.add_argument("extra", nargs="*")
     a = ap.parse_args()
-    assert a.name.startswith("aot"), "run names must start with aot"
+    assert a.name.startswith("aot") or a.name == "tcti-repro", "run names must start with aot"
+    hold = os.path.join(ROOT, ".logs", "HOLD_VMS")
+    while os.path.exists(hold):          # other session needs a quiet machine
+        print("HOLD_VMS present, waiting", flush=True)
+        time.sleep(20)
 
     env = dict(os.environ, QEMU=a.qemu)
     for kv in a.env:
@@ -42,10 +48,15 @@ def main():
         env[k] = v
     run = os.path.join(ROOT, "engine", "run", a.name)
     serial = os.path.join(run, "serial.log")
-    cmd = [os.path.join(ROOT, "tools", "run-macos.sh"), "--fresh", "--tcg", "--name", a.name,
+    cmd = [os.path.join(ROOT, "tools", "run-macos.sh"), "--fresh", "--tcg", "--machine", a.machine, "--name", a.name,
            "--adb-port", a.adb_port, "--timeout", str(a.timeout + 60)]
     if a.extra:
         cmd += ["--"] + a.extra
+    for stale in ("serial.log", "logcat.log"):   # never read a previous run's logs
+        try:
+            os.remove(os.path.join(run, stale))
+        except FileNotFoundError:
+            pass
     t0 = time.time()
     proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             start_new_session=True)
@@ -73,6 +84,20 @@ def main():
                             stop_at = now + a.linger
         if stop_at is not None and now >= stop_at:
             break
+        if os.path.exists(hold):
+            print(f"{a.name}: HOLD_VMS appeared, stopping", flush=True)
+            seen["held"] = {"wall": round(now, 2), "guest": None}
+            break
+        if a.watch:
+            pat, _, cnt = a.watch.rpartition(":")
+            lc = os.path.join(run, "logcat.log")
+            if os.path.exists(lc):
+                with open(lc, errors="replace") as f:
+                    n = f.read().count(pat)
+                if n >= int(cnt) and "watch" not in seen:
+                    seen["watch"] = {"wall": round(now, 2), "guest": None, "count": n}
+                    print(f"{a.name}: watch '{pat}' x{n} wall={now:.1f}", flush=True)
+                    stop_at = now + 2
         if now > a.timeout or proc.poll() is not None:
             break
         time.sleep(0.25)
