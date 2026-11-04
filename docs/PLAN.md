@@ -84,8 +84,20 @@ iOS App：点开即进入完整的 Android 13（AOSP，arm64）桌面。整机�
   HVF 下客户机 13.9 s 到 `sys.boot_completed=1`，进桌面持续渲染无 watchdog（`docs/home-screen.png`）。
 - **M2 iOS 模拟器里开机** ✅ App 进程内跑 QEMU（TCG JIT）+ libva_gfx，Metal 显示真实桌面，UIKit 点按/HOME/BACK 到达客户机。
   首启（装镜像+新 userdata）约 187 s 进桌面，之后约 70–80 s 到 boot_completed（`app/docs/screenshot-real-home.png`）。
-- **M3 硬件桥接**（大部分完成）：传感器/GPS/指纹/剪贴板/相机 v0/电池/触控/按键协议已通；待用真实 HAL 端到端复测相机、GNSS、
-  剪贴板，音频（virtio-snd）未接，振动无客户机通路。
+- **M3 硬件桥接**（大部分完成）：传感器/GPS/指纹/剪贴板/相机 v0/电池/触控/按键协议已通。2026-11-04 用真实 HAL 端到端验证
+  （macOS HVF + iOS 模拟器，探针 `host/macos/guest/VaHwProbe.java`）：
+  - 相机：预览和拍照有画面。gralloc 的 CPU 缓冲在 address-space 内存里，渲染器经 DMA 读写
+    （`va_gfx_set_dma_host_addr`）；GLES 没有 glGetTexImage，YUV 平面改用 FBO 回读；`Yuv420888ToNv21` 关闭（与官方一致）。
+    有平台相机时 `qemu.sf.fake_camera=none`。
+  - WiFi/联网：`va-wifi-pci`（virtio mac80211_hwsim + 内置开放 AP "AndroidWifi"，桥到独立 slirp），客户机 wlan0 自动连上、
+    拿到 10.0.2.16、VALIDATED；开机后引擎关闭 captive portal 探测（探测目标是 Google 服务器）。
+  - 蓝牙：`va-bluetooth`（virtio-serial 端口 "bluetooth" 上的 HCI 控制器，命令表由 hci_packets.pdl 生成），
+    蓝牙能开启、扫描正常结束（无真实无线电，扫不到设备，连接按寻呼超时失败）。
+  - 音频：`virtio-sound-pci` + 引擎 `va` 音频后端（va_host.h 的 speaker/mic 回调），扬声器实时 48 kHz、无欠载，
+    麦克风实时采集；virtio-snd 支持快照（停机时完成在途缓冲，恢复后继续播放）。
+  - IMU/GPS：加速度计、陀螺仪、磁力计、气压及 Android 融合出的重力/旋转矢量都有事件；GNSS 有定位。
+  振动无客户机通路；光线/接近传感器 iOS 没有可用的公开接口（接近传感器会熄屏），不提供。
+  真机 TCTI 切片尚未重建：新设备（WiFi/蓝牙/音频/相机 DMA）要等重新构建 TCTI 并重新录制 AOT 缓存，App 会自动关闭旧引擎没有的设备。
 - **M4 秒开**：首启建盘、整机快照保存/恢复，冷启动之后再开 App 几秒进桌面。
 - **M5 真机无 JIT 性能**：TCTI 构建 + AOT 翻译缓存（离线录制热点 TB → 编译成签名代码 → 运行时按内容哈希命中）。
 - **M6 真机**：签名、权限、内存权限、iPhone 实测（需要 Apple 开发者账号）。
