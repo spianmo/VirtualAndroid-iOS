@@ -12,3 +12,6 @@ app/build/
 DerivedData/
 .DS_Store
 engine/qemu-*/
+__pycache__/
+xcuserdata/
+.openidea/
