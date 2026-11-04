@@ -233,6 +233,25 @@ static inline aot_v128 aot_sshl64(aot_v128 a_, aot_v128 b_)
     aot_v128 o; memcpy(&o, r, 16); return o;
 }
 
+/*
+ * AArch64 USHL lane semantics: TCTI's shlv_vec gadget is USHL, and TCTI
+ * expands shrv/rotlv/rotrv into shlv with negative counts (right shifts).
+ */
+#define AOT_USHL(BITS, U, N)                                                    \
+static inline aot_v128 aot_ushl##BITS(aot_v128 a_, aot_v128 b_)                \
+{                                                                               \
+    U a[N], b[N], r[N]; memcpy(a, &a_, 16); memcpy(b, &b_, 16);                 \
+    for (int i = 0; i < N; i++) {                                               \
+        int c = (int8_t)b[i];                                                   \
+        r[i] = c >= 0 ? (c >= BITS ? 0 : (U)(a[i] << c)) : (-c >= BITS ? 0 : a[i] >> -c); \
+    }                                                                           \
+    aot_v128 o; memcpy(&o, r, 16); return o;                                    \
+}
+AOT_USHL(8, uint8_t, 16)
+AOT_USHL(16, uint16_t, 8)
+AOT_USHL(32, uint32_t, 4)
+AOT_USHL(64, uint64_t, 2)
+
 static inline uint64_t aot_mask(unsigned len)
 {
     return len >= 64 ? ~0ull : ((1ull << len) - 1);

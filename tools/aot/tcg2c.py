@@ -11,6 +11,10 @@ them with clang -O2 into libaot.dylib (production) and libaot-verify.dylib
 (production + journaled verification variants).
 
   tcg2c.py CAPTURE.txt --out DIR [--per-file 300] [--max N] [--prof prof.tsv]
+           [--qemu BIN] [--cc CC] [--cflags FLAGS] [--ldflags FLAGS]
+
+--cc/--cflags/--ldflags cross-compile the cache (engine/scripts/ios/build_aot.sh
+passes the iOS / iOS Simulator toolchain); the default is the host clang.
 """
 import argparse, collections, os, re, sys
 
@@ -63,6 +67,9 @@ def parse(path):
                 p = line.split()
                 cur["temps"][int(p[1])] = p[2:]
             elif line.startswith("O "):
+                if line.count("|") != 2:   # truncated tail of a killed run
+                    cur = None
+                    continue
                 head, targs, cargs = line[2:].split("|")
                 h = head.split()
                 cur["ops"].append((h[0], int(h[1]), int(h[2]), int(h[3]), int(h[4]),
@@ -163,9 +170,13 @@ class Gen:
         elif op == "rotli":
             n = int(ca[0], 16)
             E(R(f"(({VT})({i[0]}) << {n}) | (({VT})({i[0]}) >> ({bits - n} & {bits - 1}))") if n else f"  {o[0]} = {i[0]};")
-        elif op in ("shlv", "shrv", "sarv"):
+        elif op == "shlv":
+            # TCTI's shlv gadget is USHL (signed per-lane count, negative =
+            # logical right shift); its shrv/rotlv/rotrv expansions rely on that
+            E(f"  {o[0]} = aot_ushl{bits}({i[0]}, {i[1]});")
+        elif op in ("shrv", "sarv"):
             t = ST if op == "sarv" else VT
-            sh = "<<" if op == "shlv" else ">>"
+            sh = ">>"
             E(R(f"({t})({i[0]}) {sh} (({t})(({VT})({i[1]}) & {bits - 1}))"))
         elif op in ("shls", "shrs", "sars"):
             t = ST if op == "sars" else VT
@@ -540,6 +551,9 @@ def main():
     ap.add_argument("--qemu", help="bind helper addresses to this QEMU binary (nm)")
     ap.add_argument("--layout-sig", help="override the layout signature (hex)")
     ap.add_argument("--no-inline-i128", action="store_true")
+    ap.add_argument("--cc", default="clang", help="compiler command for build.ninja")
+    ap.add_argument("--cflags", default="", help="extra compile flags (target, sysroot)")
+    ap.add_argument("--ldflags", default="", help="extra link flags (target, sysroot, install name)")
     a = ap.parse_args()
     layout, tbs = parse(a.capture)
     if a.layout_sig:
@@ -636,9 +650,9 @@ def main():
     # ninja
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(a.out, "build.ninja"), "w") as f:
-        f.write(f"cflags = -O2 -fno-strict-aliasing -fwrapv -fPIC -fvisibility=hidden -w -I{here} -DAOT_PAGE_BITS={layout['page_bits']}\n")
-        f.write("rule cc\n  command = clang $cflags $extra -c $in -o $out\n")
-        f.write("rule link\n  command = clang -dynamiclib -o $out $in\n")
+        f.write(f"cflags = -O2 -fno-strict-aliasing -fwrapv -fPIC -fvisibility=hidden -w -I{here} -DAOT_PAGE_BITS={layout['page_bits']} {a.cflags}\n")
+        f.write(f"rule cc\n  command = {a.cc} $cflags $extra -c $in -o $out\n")
+        f.write(f"rule link\n  command = {a.cc} -dynamiclib {a.cflags} {a.ldflags} -o $out $in\n")
         objs, vobjs = [], []
         for name in files:
             o = name[:-2] + ".o"
