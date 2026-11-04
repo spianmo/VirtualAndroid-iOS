@@ -3,7 +3,8 @@
 #
 #   tools/run-macos.sh [--fresh] [--tcg] [--machine virt|ranchu] [--display] [--timeout SECS]
 #                      [--name RUN] [--adb-port PORT] [--trace PATTERN]... [--console]
-#                      [--gfx-lib PATH|none] [--screenshot-dir DIR] [-- extra qemu args]
+#                      [--gfx-lib PATH|none] [--screenshot-dir DIR] [--snapshot]
+#                      [-- extra qemu args]
 #
 # --machine ranchu (the Android emulator board: virt + goldfish pipe/sync/battery/events,
 # virtio multitouch + "qwerty2" keyboard) also enables the android_pipe_connect trace, so
@@ -17,6 +18,12 @@
 # ranchu also adds services' va-vsock-pci (adb on 127.0.0.1:PORT via vsock, pipe-port 5000);
 # boot check: adb -s 127.0.0.1:PORT shell getprop sys.boot_completed
 # VA_HOST_PLATFORM=<libva_host_macos.dylib> (host/macos/build.sh) loads the test platform.
+# QMP is always on $RUN/qmp.sock.
+# --snapshot (ranchu, docs/SNAPSHOT.md): guest RAM lives in $RUN/snapshot/ram.img
+# (memory-backend-file, share=on) and the machine gets snapshot-dir=$RUN/snapshot. If that
+# directory holds a clean snapshot matching this launch, QEMU starts with -incoming defer and
+# tools/snapshot.py restore loads it (log: $RUN/restore.log); otherwise the snapshot is
+# discarded and the guest cold-boots. Save with: tools/snapshot.py suspend --run $RUN [--quit]
 #   QEMU=/path/to/qemu-system-aarch64 overrides the binary (each agent uses its own build dir).
 #
 # Per-run state lives in engine/run/<name> (default "dev"): writable disks,
@@ -28,7 +35,7 @@ QEMU=${QEMU:-$ROOT/engine/build-macos/qemu-system-aarch64}
 QEMU_IMG=${QEMU_IMG:-$ROOT/engine/build-macos/qemu-img}
 E2=$(brew --prefix e2fsprogs)/sbin
 NAME=dev FRESH=0 ACCEL=hvf MACHINE=virt DISPLAY_OPT=(-display none) TIMEOUT=0 ADB_PORT=5555
-TRACES=() CONSOLE=0 GFX_LIB=auto SHOT_DIR=
+TRACES=() CONSOLE=0 GFX_LIB=auto SHOT_DIR= SNAPSHOT=0
 while (( $# )); do
   case $1 in
     --fresh) FRESH=1 ;;
@@ -42,14 +49,19 @@ while (( $# )); do
     --console) CONSOLE=1 ;;
     --gfx-lib) GFX_LIB=$2; shift ;;
     --screenshot-dir) SHOT_DIR=${2:A}; shift ;;
+    --snapshot) SNAPSHOT=1 ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
   shift
 done
 RUN=$ROOT/engine/run/$NAME
+SNAP=$RUN/snapshot
 mkdir -p $RUN
+SNAPPY=(python3 -I $ROOT/tools/snapshot.py)
 if (( FRESH )) || [[ ! -f $RUN/userdata.img ]]; then
+  # New disks invalidate any snapshot.
+  [[ -d $SNAP ]] && $SNAPPY discard --run $RUN
   rm -f $RUN/userdata.img $RUN/encryptionkey.img $RUN/cache.img
   cp $IMG/encryptionkey.img $RUN/
   mkfile -n 6g $RUN/userdata.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L data $RUN/userdata.img
@@ -84,14 +96,22 @@ if [[ $MACHINE == ranchu* ]]; then
   if [[ $GFX_LIB == none ]]; then MACHINE=$MACHINE,gfx=off; else MACHINE=$MACHINE,gfx-lib=$GFX_LIB; fi
 fi
 [[ -n $SHOT_DIR ]] && export VA_DUMP_FRAMES=$SHOT_DIR
+MEM_OPT=(-m 2048)
+if (( SNAPSHOT )); then
+  [[ $MACHINE == ranchu* ]] || { echo "--snapshot needs --machine ranchu" >&2; exit 2; }
+  mkdir -p $SNAP
+  MACHINE=$MACHINE,snapshot-dir=$SNAP
+  MEM_OPT=(-m 2048 -object memory-backend-file,id=ram0,size=2G,mem-path=$SNAP/ram.img,share=on
+           -machine memory-backend=ram0)
+fi
 TRACE_OPT=()
 for t in $TRACES; do TRACE_OPT+=(-trace "enable=$t"); done
 
 if [[ $ACCEL == hvf ]]; then CPU=(-accel hvf -cpu host); else CPU=(-accel tcg,thread=multi,tb-size=1024 -cpu cortex-a76); fi
 
 ARGS=(
-  -M $MACHINE $CPU -smp 4 -m 2048 -nodefaults $DISPLAY_OPT
-  $SERIAL_OPT -monitor unix:$RUN/monitor.sock,server,nowait
+  -M $MACHINE $CPU -smp 4 $MEM_OPT -nodefaults $DISPLAY_OPT
+  $SERIAL_OPT -monitor unix:$RUN/monitor.sock,server,nowait -qmp unix:$RUN/qmp.sock,server=on,wait=off
   -kernel $IMG/kernel-ranchu -initrd $RUN/initrd
   -append "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 printk.devkmsg=on bootconfig"
   # Order matters: it fixes the virtio-mmio addresses the image's fstab expects.
@@ -109,11 +129,35 @@ ARGS=(
   "$@"
 )
 echo "run dir: $RUN"
+RESTORE=0
+if (( SNAPSHOT )); then
+  # What a snapshot must match: engine, renderer, image files, cold-boot argv.
+  $SNAPPY launch --run $RUN --qemu $QEMU --gfx "$GFX_LIB" \
+    --images $IMG/kernel-ranchu $RUN/initrd $IMG/vendor.img $IMG/system.img $IMG/ramdisk.img -- $ARGS
+  if $SNAPPY check --run $RUN; then
+    RESTORE=1
+    echo "restoring snapshot from $SNAP"
+  else
+    $SNAPPY discard --run $RUN
+  fi
+fi
+rm -f $RUN/qmp.sock
+zmodload zsh/datetime
+T0=$EPOCHREALTIME
+if (( RESTORE )); then
+  ARGS+=(-incoming defer)
+  RESTORE_OPT=(--run $RUN --t0 $T0 --adb-port $ADB_PORT)
+  [[ -n $SHOT_DIR ]] && RESTORE_OPT+=(--frame-dir $SHOT_DIR)
+  ( $SNAPPY restore $RESTORE_OPT > $RUN/restore.log 2>&1 ||
+      echo "restore failed, see $RUN/restore.log" >&2 ) &
+fi
 if (( TIMEOUT > 0 )); then
   $QEMU $ARGS > $RUN/qemu.out 2>&1 &
   QPID=$!
   ( sleep $TIMEOUT; kill $QPID 2>/dev/null ) &
   wait $QPID || true
+elif (( RESTORE )); then
+  $QEMU $ARGS
 else
   exec $QEMU $ARGS
 fi
