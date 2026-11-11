@@ -8,7 +8,8 @@ the guest kernel timestamp).
                           [--env K=V ...] [--json out.json] [-- extra qemu args]
 
 Stops the VM (only the one it started) once the --stop-after milestone is seen
-(+ --linger seconds) or at --timeout.
+(+ --linger seconds) or at --timeout. The kernel command line is run-macos.sh's;
+--env VA_KERNEL_PERF=0 drops "kpti=0 nokaslr mitigations=off init_on_alloc=0" (A/B).
 """
 import argparse, json, os, re, signal, subprocess, sys, time
 

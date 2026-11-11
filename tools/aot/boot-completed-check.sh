@@ -23,8 +23,8 @@ while (( SECONDS - T0 < TIMEOUT )); do
   t=$((SECONDS - T0))
   if [[ -e $HOLD ]]; then echo "[$t s] HOLD_VMS appeared, stopping"; stop; exit 2; fi
   died=$(grep -c "System zygote died" $RUN/logcat.log 2>/dev/null)
-  preload=$(grep -c "begin preload" $RUN/logcat.log 2>/dev/null)
-  done_preload=$(grep -c "end preload" $RUN/logcat.log 2>/dev/null)
+  preload=$(grep -c "ZygoteHooks.beginPreload" $RUN/logcat.log 2>/dev/null)   # Info level (logcat *:I)
+  done_preload=$(grep -c "ZygoteHooks.endPreload" $RUN/logcat.log 2>/dev/null)
   ss=$(grep -c "Entered the Android system server" $RUN/logcat.log 2>/dev/null)
   $ADB connect 127.0.0.1:$PORT > /dev/null 2>&1
   bc=$($ADB -s 127.0.0.1:$PORT shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')

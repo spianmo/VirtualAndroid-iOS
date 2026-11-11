@@ -4,12 +4,18 @@
 #
 #   engine/scripts/ios/build_aot.sh [-p ios|ios_simulator] [-c CAPTURE.txt]
 #                                   [--prof PROF.tsv] [--max N]
+#                                   [--no-passthrough] [--out DIR]
 #
 #   -p      platform (default ios_simulator)
 #   -c      op capture (QEMU_AOT_CAPTURE) from a TCTI build of the same source
 #           and configuration; without -c the last capture is reused
 #   --prof  tbprof TSV: keep the hottest TBs first (with --max)
 #   --max   cap the number of TBs (0 = all captured TBs)
+#   --no-passthrough
+#           plain helper calls for FP/crypto/CRC (no same-ISA passthrough,
+#           docs/AOT.md); also AOT_PASSTHROUGH=0 in the environment
+#   --out   generate and compile into DIR only (toolchain checks): no
+#           framework, nothing written under qemu-tcti/
 #
 # The cache calls QEMU helpers at offsets from aot_anchor read from this exact
 # QEMU binary (nm), so run it again after every rebuild of the TCTI framework
@@ -27,13 +33,17 @@ ARCH=arm64
 CAPTURE=
 PROF=
 MAX=0
+PASSTHROUGH="${AOT_PASSTHROUGH:-1}"
+GEN_ONLY=
 while [ $# -gt 0 ]; do
     case "$1" in
     -p ) PLATFORM="$2"; shift ;;
     -c ) CAPTURE="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift ;;
     --prof ) PROF="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift ;;
     --max ) MAX="$2"; shift ;;
-    -h | --help ) sed -n 2,21p "$0"; exit 0 ;;
+    --no-passthrough ) PASSTHROUGH=0 ;;
+    --out ) mkdir -p "$2"; GEN_ONLY="$(cd "$2" && pwd)"; shift ;;
+    -h | --help ) sed -n 2,28p "$0"; exit 0 ;;
     * ) echo "unknown option $1" >&2; exit 2 ;;
     esac
     shift
@@ -43,8 +53,9 @@ export PLATFORM ARCH
 
 Q="$PLAT_DIR/qemu-tcti"
 QBIN="$Q/Frameworks/qemu-aarch64-softmmu.framework/qemu-aarch64-softmmu"
-GEN="$Q/aot"
+GEN="${GEN_ONLY:-$Q/aot}"
 [ -f "$QBIN" ] || die "missing $QBIN: run build_qemu.sh -p $PLATFORM -b tcti first"
+[ -n "$GEN_ONLY" ] && [ -z "$CAPTURE" ] && die "--out needs -c CAPTURE.txt"
 mkdir -p "$GEN"
 if [ -n "$CAPTURE" ]; then
     [ -f "$CAPTURE" ] || die "no capture at $CAPTURE"
@@ -56,14 +67,23 @@ fi
 PROF_ARGS=()
 [ -e "$GEN/prof.tsv" ] && PROF_ARGS=(--prof "$GEN/prof.tsv")
 MAX="$(cat "$GEN/max" 2>/dev/null || echo 0)"
+PT_ARGS=()
+[ "$PASSTHROUGH" = 0 ] && PT_ARGS=(--no-passthrough)
 
-say "generating C from $(readlink "$GEN/capture.txt"), bound to $QBIN"
+say "generating C from $(readlink "$GEN/capture.txt"), bound to $QBIN" \
+    "(passthrough $([ "$PASSTHROUGH" = 0 ] && echo off || echo on))"
+# tcg2c.py adds -mcrc (CRC32 is not in the arm64 iOS baseline; AES/SHA-256
+# are) and -ffp-contract=off for the passthrough code
 python3 -I "$ROOT/tools/aot/tcg2c.py" "$GEN/capture.txt" --out "$GEN" --max "$MAX" "${PROF_ARGS[@]}" \
-    --qemu "$QBIN" --cc "$(xcrun --sdk $SDK --find clang)" \
+    "${PT_ARGS[@]}" --qemu "$QBIN" --cc "$(xcrun --sdk $SDK --find clang)" \
     --cflags "-arch $ARCH -isysroot $SDKROOT $CFLAGS_TARGET" \
     --ldflags "-install_name @rpath/va_aot.framework/va_aot"
 say "compiling ($NCPU jobs)"
 ninja -C "$GEN" -j "$NCPU" libaot.dylib
+if [ -n "$GEN_ONLY" ]; then
+    say "done: $GEN/libaot.dylib ($(du -h "$GEN/libaot.dylib" | cut -f1)), not packaged"
+    exit 0
+fi
 say "packaging va_aot.framework"
 cp "$GEN/libaot.dylib" "$GEN/libva_aot.dylib"
 make_framework "$GEN/libva_aot.dylib" "$Q/Frameworks"

@@ -12,9 +12,17 @@ them with clang -O2 into libaot.dylib (production) and libaot-verify.dylib
 
   tcg2c.py CAPTURE.txt --out DIR [--per-file 300] [--max N] [--prof prof.tsv]
            [--qemu BIN] [--cc CC] [--cflags FLAGS] [--ldflags FLAGS]
+           [--no-passthrough] [--pt-fpsr] [--pt-stats]
 
 --cc/--cflags/--ldflags cross-compile the cache (engine/scripts/ios/build_aot.sh
 passes the iOS / iOS Simulator toolchain); the default is the host clang.
+
+Same-ISA passthrough (default on, docs/AOT.md): FP, crypto, CRC and some
+integer/Neon helper calls become inline host instructions (aot_rt.h,
+aot_pt_*); --no-passthrough generates the plain helper calls (A/B).
+--pt-fpsr also passes through rounding FP ops while Inexact is still clear,
+using the host FPSR; --pt-stats counts inline hits and fallbacks per helper
+and prints them at exit when AOT_PT_STATS is set in the environment.
 """
 import argparse, collections, os, re, sys
 
@@ -32,6 +40,59 @@ UNSAFE_HELPER = re.compile(
 
 LDST_SYMS = ["helper_ldub_mmu", "helper_lduw_mmu", "helper_ldul_mmu", "helper_ldq_mmu",
              "helper_stb_mmu", "helper_stw_mmu", "helper_stl_mmu", "helper_stq_mmu"]
+
+
+# Same-ISA passthrough (aot_rt.h, "Same-ISA passthrough"): helper name ->
+# (fallible, oprsz_allowed, const_args).  Fallible ones return 0 from
+# aot_pt_<helper>() when they cannot prove a bit-identical result, and the
+# generated code then calls the helper.  oprsz_allowed (gvec helpers): the
+# descriptor (last argument) must be a TB constant with maxsz 16 and one of
+# these oprsz.  const_args: {arg index: allowed constant values}.
+def _pt_table():
+    t = {}
+    F, I = True, False
+    V, Q = (8, 16), (16,)
+    for p in "sd":
+        for op in ("add", "sub", "mul", "div", "min", "max", "minnum", "maxnum", "muladd", "sqrt"):
+            t[f"vfp_{op}{p}"] = (F, None, None)
+        for n in (f"vfp_cmp{p}_a64", f"vfp_cmpe{p}_a64", f"rint{p}", f"rint{p}_exact"):
+            t[n] = (F, None, None)
+        for i in ("sl", "ul", "sq", "uq", "si", "ui"):
+            t[f"vfp_{i}to{p}"] = (F, None, None)
+        for i in ("sl", "ul", "sq", "uq"):
+            t[f"vfp_to{i}{p}"] = (F, None, None)
+            if p == "d" or i in ("sl", "ul"):     # no vfp_to{sq,uq}s_round_to_zero
+                t[f"vfp_to{i}{p}_round_to_zero"] = (F, None, None)
+        for i in ("si", "ui", "siz", "uiz"):
+            t[f"vfp_to{i}{p}"] = (F, None, None)
+    t["vfp_fcvtds"] = t["vfp_fcvtsd"] = (F, None, None)
+    t["set_rmode"] = (I, None, None)
+    for p, sz in (("s", V), ("d", Q)):
+        for op in ("fadd", "fsub", "fmul", "fdiv", "fmin", "fmax", "fminnum", "fmaxnum",
+                   "fceq", "fcge", "fcgt", "fceq0", "fcgt0", "fcge0", "fclt0", "fcle0",
+                   "fmul_idx", "vfma", "vfms", "fmla_idx", "fmls_idx"):
+            t[f"gvec_{op}_{p}"] = (F, sz, None)
+    for n, sz in (("sf", V), ("uf", V), ("sd", Q), ("ud", Q), ("rz_fs", V), ("rz_fu", V),
+                  ("rm_ss", V), ("rm_us", V), ("rz_ds", Q), ("rz_du", Q), ("rm_sd", Q),
+                  ("rm_ud", Q)):
+        t[f"gvec_vcvt_{n}"] = (F, sz, None)
+    for n in ("muluh_i64", "mulsh_i64", "udiv64", "sdiv64", "rbit", "rbit64",
+              "neon_narrow_u8", "neon_narrow_u16", "neon_widen_u8", "neon_widen_u16",
+              "neon_clz_u16"):
+        t[n] = (I, None, None)
+    t["crc32c_64"] = (I, None, {2: (1, 2, 4, 8)})
+    t["crc32_64"] = (F, None, {2: (1, 2, 4, 8)})
+    for n in ("aese", "aesd", "aesmc", "aesimc", "sha256h", "sha256h2", "sha256su0", "sha256su1"):
+        t[f"crypto_{n}"] = (I, Q, None)
+    for op in ("addp", "smaxp", "umaxp", "sminp", "uminp"):
+        for e in "bhs":
+            t[f"gvec_{op}_{e}"] = (I, V, None)
+    t["gvec_addp_d"] = (I, Q, None)
+    t["gvec_cnt_b"] = t["gvec_rbit_b"] = (I, V, None)
+    return t
+
+
+PASSTHROUGH = _pt_table()
 
 
 class Unsupported(Exception):
@@ -78,8 +139,11 @@ def parse(path):
 
 
 class Gen:
-    def __init__(self, layout, syms=None, tlb_base=None, ld128_off=None):
+    def __init__(self, layout, syms=None, tlb_base=None, ld128_off=None, passthrough=True):
         self.syms = syms
+        self.passthrough = passthrough
+        self.pt_ids = collections.OrderedDict()   # helper -> stats slot
+        self.pt_static = collections.Counter()    # inlined call sites
         self.tlb_base = tlb_base          # TLB mask/table offset of mmu_idx 0
         self.ld128_off = ld128_off or {}
         self.helpers = collections.OrderedDict()  # (name, off) -> index
@@ -127,6 +191,51 @@ class Gen:
               f"H({k}, helper_ld_i128))(env, a_, 0x{oi:x}u); lo_ = (uint64_t)r_; hi_ = (uint64_t)(r_ >> 64);"
               f" RT_SLOW_END(aot_tlb(env, a_, {ofs}, 0, 4, {ab}) != 0); }}")
             E(f"    {ex(ta[0])} = lo_; {ex(ta[1])} = hi_; }}")
+        return True
+
+    def gen_pt(self, hname, ret, rt, no, codes, args, ta, temps, ex, width, E, ra, callx):
+        """Same-ISA passthrough of one helper call (aot_rt.h, aot_pt_*).
+        Returns False when the call must stay a plain helper call."""
+        ent = PASSTHROUGH.get(hname) if self.passthrough else None
+        if ent is None or 7 in codes or ret == 7 or no > 1 or (ret == 0) != (no == 0):
+            return False
+        fallible, oprsz_ok, consts = ent
+        ins = ta[no:]
+        def const(j):
+            d = temps[ins[j]]
+            return int(d[3], 16) if d[0] == "K" else None
+        if oprsz_ok is not None:
+            desc = const(len(codes) - 1)
+            if desc is None:
+                return False
+            maxsz = (desc & 0xff) * 8 + 8
+            f = (desc >> 8) & 3
+            oprsz = maxsz if f == 2 else f * 8 + 8
+            if maxsz != 16 or oprsz not in oprsz_ok:
+                return False
+        for j, ok in (consts or {}).items():
+            if const(j) not in ok:
+                return False
+        if hname not in self.pt_ids:
+            self.pt_ids[hname] = len(self.pt_ids)
+        sid = self.pt_ids[hname]
+        self.pt_static[hname] += 1
+        pargs = [f"PTR({a})" if c == 6 else a for a, c in zip(args, codes)]
+        fn = f"aot_pt_{hname}"
+        if not fallible:
+            E(f"  AOT_PT_HIT({sid});")
+            if ret == 0:
+                E(f"  {fn}({', '.join(pargs)});")
+            else:
+                E(f"  {ex(ta[0])} = ({U[width(ta[0])]}){fn}({', '.join(pargs)});")
+            return True
+        if ret == 0:
+            E(f"  if (likely({fn}({', '.join(pargs)}))) {{ AOT_PT_HIT({sid}); }}")
+            E(f"  else {{ AOT_PT_MISS({sid}); *ra = {ra}; {callx}; }}")
+        else:
+            E(f"  {{ {rt} r_; if (likely({fn}(&r_, {', '.join(pargs)}))) {{ AOT_PT_HIT({sid}); }}")
+            E(f"    else {{ AOT_PT_MISS({sid}); *ra = {ra}; r_ = {callx}; }}")
+            E(f"    {ex(ta[0])} = ({U[width(ta[0])]})r_; }}")
         return True
 
     def gen_vec(self, op, ty, vece, no, ni, ta, ca, ex, base, E):
@@ -483,10 +592,12 @@ class Gen:
                     raise Unsupported(f"call arity {hname}")
                 rt = "void" if ret == 0 else ctype[ret]
                 proto = f"{rt} (*)({', '.join(at) if at else 'void'})"
+                callx = f"(({proto})H({k}, {sym}))({', '.join(args)})"
+                if self.gen_pt(hname, ret, rt, no, codes, args, ta, temps, ex, width, E, ra, callx):
+                    continue
                 if UNSAFE_HELPER.search(hname):
                     E("  RT_UNSAFE();")
                 E(f"  *ra = {ra};")
-                callx = f"(({proto})H({k}, {sym}))({', '.join(args)})"
                 if ret == 0:
                     if no:
                         raise Unsupported("void call with outputs")
@@ -554,6 +665,12 @@ def main():
     ap.add_argument("--cc", default="clang", help="compiler command for build.ninja")
     ap.add_argument("--cflags", default="", help="extra compile flags (target, sysroot)")
     ap.add_argument("--ldflags", default="", help="extra link flags (target, sysroot, install name)")
+    ap.add_argument("--no-passthrough", action="store_true",
+                    help="plain helper calls only (no same-ISA passthrough)")
+    ap.add_argument("--pt-fpsr", action="store_true",
+                    help="passthrough rounding FP ops with Inexact clear via the host FPSR")
+    ap.add_argument("--pt-stats", action="store_true",
+                    help="count passthrough hits/fallbacks (printed at exit if AOT_PT_STATS is set)")
     a = ap.parse_args()
     layout, tbs = parse(a.capture)
     if a.layout_sig:
@@ -593,7 +710,7 @@ def main():
             ld128_off[kk] = syms[f"helper_{kk}_i128"] - syms["aot_anchor"]
     if a.no_inline_i128:
         tlb_base = None
-    g = Gen(layout, syms, tlb_base, ld128_off)
+    g = Gen(layout, syms, tlb_base, ld128_off, passthrough=not a.no_passthrough)
     good = []
     why = collections.Counter()
     seen = set()
@@ -644,13 +761,42 @@ def main():
                     f"\n#ifdef AOT_WITH_VERIFY\n aot_v_{fn},\n#else\n 0,\n#endif\n"
                     f"  {h['nexits']}, {h['icount']}, {h['npool']}, 0 }},\n")
         f.write("};\n")
+        # passthrough runtime switch (aot_rt.h rule 1) and optional counters;
+        # nothing of it with --no-passthrough, which generates exactly the
+        # pre-passthrough output
+        if g.passthrough:
+            f.write("#include <stdio.h>\n#include <stdlib.h>\n"
+                    "int aot_pt_on __attribute__((visibility(\"hidden\")));\n"
+                    "__attribute__((constructor)) static void aot_pt_init(void)\n{\n"
+                    "  const char *e = getenv(\"QEMU_AOT_PT_FP\");\n"
+                    "  aot_pt_on = !(e && *e == '0');\n}\n")
+        if a.pt_stats and g.passthrough:
+            npt = max(1, len(g.pt_ids))
+            f.write(f"uint64_t aot_pt_cnt[{npt}][2] __attribute__((visibility(\"hidden\")));\n")
+            f.write(f"static const char *const aot_pt_names[{npt}] = {{\n")
+            for hn in g.pt_ids:
+                f.write(f'  "{hn}",\n')
+            f.write("};\n")
+            f.write("__attribute__((destructor)) static void aot_pt_fini(void)\n{\n"
+                    "  if (!getenv(\"AOT_PT_STATS\")) return;\n"
+                    f"  for (int i = 0; i < {len(g.pt_ids)}; i++) {{\n"
+                    "    if (aot_pt_cnt[i][0] | aot_pt_cnt[i][1])\n"
+                    "      fprintf(stderr, \"aot-pt %-28s inline %12llu fallback %12llu\\n\", aot_pt_names[i],\n"
+                    "              (unsigned long long)aot_pt_cnt[i][0], (unsigned long long)aot_pt_cnt[i][1]);\n"
+                    "  }\n}\n")
         f.write("__attribute__((visibility(\"default\"))) const AotTable aot_table = {\n")
         f.write(f"  0x31544f41u, 1, {layout['page_bits']}, {len(ents)}, 0x{layout['sig']}ull, entries,\n")
         f.write(f"  {nh}, 6, helper_offs, aot_H, aot_RT\n}};\n")
     # ninja
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(a.out, "build.ninja"), "w") as f:
-        f.write(f"cflags = -O2 -fno-strict-aliasing -fwrapv -fPIC -fvisibility=hidden -w -I{here} -DAOT_PAGE_BITS={layout['page_bits']} {a.cflags}\n")
+        # -mcrc: CRC32 instructions (not in the iOS arm64 baseline, apple-a7);
+        # AES/SHA-256 are.  -ffp-contract=off: FP passthrough relies on each C
+        # FP operation being one IEEE operation (aot_rt.h).
+        ptdef = (" -DAOT_PT_FPSR" if a.pt_fpsr else "") + (" -DAOT_PT_STATS" if a.pt_stats else "")
+        ptflags = " -ffp-contract=off -mcrc" if g.passthrough else ""
+        f.write(f"cflags = -O2 -fno-strict-aliasing -fwrapv{ptflags} -fPIC -fvisibility=hidden -w "
+                f"-I{here} -DAOT_PAGE_BITS={layout['page_bits']}{ptdef if g.passthrough else ''} {a.cflags}\n")
         f.write(f"rule cc\n  command = {a.cc} $cflags $extra -c $in -o $out\n")
         f.write(f"rule link\n  command = {a.cc} -dynamiclib {a.cflags} {a.ldflags} -o $out $in\n")
         objs, vobjs = [], []
@@ -667,6 +813,9 @@ def main():
         f.write(f"build libaot-verify.dylib: link {' '.join(objs + vobjs)} aot_table.v.o\n")
         f.write("default libaot.dylib\n")
     print(f"tbs in capture: {len(tbs)}  generated: {len(good)}  helpers: {len(g.helpers)}  files: {len(files)}")
+    if g.passthrough:
+        print(f"passthrough: {sum(g.pt_static.values())} call sites of {len(g.pt_static)} helpers inlined"
+              f"{' (FPSR variant)' if a.pt_fpsr else ''}")
     for k, v in why.most_common(30):
         print(f"  skipped {v:7d}  {k}")
 
