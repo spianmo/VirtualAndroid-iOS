@@ -55,9 +55,24 @@ typedef void (^VAEngineExitHandler)(int status, BOOL fatal);
 
 @end
 
-/* True when the process may JIT: always on the simulator, on device only when
- * a debugger has attached (CS_DEBUGGED, e.g. Xcode or StikDebug). */
+/* True when an engine started now could JIT: always on the simulator; on a
+ * device a debugger must have attached (CS_DEBUGGED, e.g. StikDebug or Xcode),
+ * and on iOS 26+ (TXM) it must still be attached so that it can prepare the
+ * engine's code buffer. Sample it once at launch: the engine detaches the
+ * debugger after the preparation. */
 bool va_runtime_jit_available(void);
+/* CS_DEBUGGED is set (a debugger attached at some point; simulator: true). */
+bool va_runtime_cs_debugged(void);
+/* A debugger is attached right now (P_TRACED). */
+bool va_runtime_debugger_attached(void);
+/* iOS 26+ device: JIT memory must be prepared by an attached debugger. */
+bool va_runtime_jit_needs_debugger(void);
+/* No JIT in this process although StikDebug attached for it: tell its script
+ * to detach (legacy brk #0x69 with an empty region, then the universal detach
+ * call), so the app is not stopped on every signal or killed with StikDebug.
+ * Returns true when the debugger is gone afterwards. Do not call under Xcode's
+ * debugger, which stops on the brk. */
+bool va_runtime_release_jit_debugger(void);
 /* os_proc_available_memory() on device, physical memory on the simulator. */
 uint64_t va_runtime_available_memory(void);
 bool va_runtime_is_simulator(void);

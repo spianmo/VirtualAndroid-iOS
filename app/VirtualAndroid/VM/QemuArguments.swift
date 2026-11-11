@@ -8,13 +8,93 @@ enum AccelMode: Equatable {
     /// UTM's TCTI threaded interpreter (no JIT, plain device builds).
     case tcti
 
-    var qemuValue: String {
+    var qemuValue: String { qemuValue(tbSizeMB: nil) }
+
+    /// `tbSizeMB` overrides the code buffer size (TCTI: see `tctiTBSizeMB`).
+    func qemuValue(tbSizeMB: Int?) -> String {
         switch self {
         case .tcgJIT(let splitWX):
             // Smaller code buffer on device: split-wx maps it twice.
-            return splitWX ? "tcg,thread=multi,tb-size=512,split-wx=on" : "tcg,thread=multi,tb-size=1024"
+            return splitWX ? "tcg,thread=multi,tb-size=\(tbSizeMB ?? 512),split-wx=on"
+                           : "tcg,thread=multi,tb-size=\(tbSizeMB ?? 1024)"
         case .tcti:
-            return "tcg,thread=multi,tb-size=512"
+            return "tcg,thread=multi,tb-size=\(tbSizeMB ?? 512)"
+        }
+    }
+
+    /// TCTI code buffer for a process with `availableMB` left (os_proc_available_memory)
+    /// and a `guestMB` guest: everything above the guest RAM and a 1.5 GB reserve
+    /// (renderer, AOT table, the app), in 256 MB steps, 512...2048 MB. TCTI streams
+    /// are large (a full boot plus ten minutes of UI fills about 1 GB), and a full
+    /// buffer means tb_flush: every vCPU stops and all code, AOT hits included, is
+    /// translated again. The buffer is plain anonymous memory, so only what is used
+    /// counts against the memory limit.
+    static func tctiTBSizeMB(availableMB: Int, guestMB: Int) -> Int {
+        let spare = (availableMB - guestMB - 1536) / 256 * 256
+        return min(max(spare, 512), 2048)
+    }
+}
+
+/// JIT or TCTI for this launch, decided once per process at launch
+/// (QemuEngine.jitDecision). Pure logic, unit-tested.
+///
+/// On a device JIT needs a debugger: StikDebug launches the app attached
+/// (CS_DEBUGGED), and on iOS 26+ (TXM) its script must still be attached when
+/// QEMU allocates the code buffer, because the debugger makes that region
+/// executable (engine tcg/region.c). QEMU then detaches it.
+struct JITDecision: Equatable {
+    enum Reason: Equatable {
+        /// Simulator: JIT always works.
+        case simulator
+        /// Launched with a debugger (StikDebug) that can enable JIT.
+        case debugger
+        /// The JIT option is off.
+        case disabled
+        /// No debugger: the app was opened normally, not from StikDebug.
+        case noDebugger
+        /// The previous launch with JIT ended before the engine got going.
+        case lastStartFailed
+        /// The app was built without a JIT engine (TCTI only).
+        case noJITEngine
+    }
+
+    var useJIT: Bool
+    var reason: Reason
+    /// A debugger attached for JIT (StikDebug's script) waits for us, but no
+    /// JIT engine will ask it to prepare memory: tell it to detach now.
+    var releaseDebugger: Bool
+
+    static func decide(enabled: Bool, simulator: Bool, jitAvailable: Bool,
+                       debuggerAttached: Bool, needsDebugger: Bool,
+                       jitEngineEmbedded: Bool, tctiEngineEmbedded: Bool,
+                       lastStartFailed: Bool) -> JITDecision {
+        // Only a debugger that waits for the engine's region call can be released.
+        let waiting = debuggerAttached && needsDebugger
+        let possible = simulator || jitAvailable
+        let jit = JITDecision(useJIT: true, reason: simulator ? .simulator : .debugger, releaseDebugger: false)
+        func tcti(_ reason: Reason) -> JITDecision {
+            JITDecision(useJIT: false, reason: reason, releaseDebugger: waiting)
+        }
+        guard jitEngineEmbedded else { return tcti(.noJITEngine) }
+        // Nothing else to run: JIT wherever it works, whatever the option says.
+        guard tctiEngineEmbedded else {
+            return possible ? jit : JITDecision(useJIT: false, reason: .noDebugger, releaseDebugger: false)
+        }
+        guard enabled else { return tcti(.disabled) }
+        guard possible else { return tcti(.noDebugger) }
+        guard simulator || !lastStartFailed else { return tcti(.lastStartFailed) }
+        return jit
+    }
+
+    /// One line for the start screen.
+    var summary: String {
+        switch reason {
+        case .simulator: return "JIT"
+        case .debugger: return "JIT (enabled by StikDebug)"
+        case .disabled: return "TCTI + AOT cache: JIT is turned off"
+        case .noDebugger: return "TCTI + AOT cache: open VirtualAndroid from StikDebug to use JIT"
+        case .lastStartFailed: return "TCTI + AOT cache: the last JIT start failed; JIT is tried again on the next launch"
+        case .noJITEngine: return "TCTI + AOT cache: this build has no JIT engine"
         }
     }
 }
@@ -44,6 +124,9 @@ struct QemuArgumentBuilder {
     var cpu = "cortex-a76"
     var cpuCount = 4
     var memoryMB = 2048
+    /// TCG code buffer (`-accel ...,tb-size=`); nil = the accel mode's default.
+    /// Not part of the snapshot identity (SnapshotHash.argvHash drops it).
+    var tbSizeMB: Int?
 
     var kernel: URL
     var initrd: URL
@@ -89,9 +172,22 @@ struct QemuArgumentBuilder {
     var incomingDefer = false
     var extra: [String] = []
 
+    /// Adds `kernelPerfArguments` to the kernel command line (default;
+    /// `-VAKernelPerf NO` turns it off for A/B runs).
+    var kernelPerf = true
+
     static let kernelCommandLine =
         "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 " +
         "ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig mac80211_hwsim.radios=0"
+    /// Guest kernel settings for emulation (as tools/run-macos.sh, VA_KERNEL_PERF=0
+    /// drops them): no KPTI (KASLR forces it on; then every kernel entry/exit
+    /// writes TTBR1 with another ASID and QEMU flushes the whole softmmu TLB),
+    /// no KASLR, no side-channel mitigations, no zeroing of every page allocation.
+    static let kernelPerfArguments = "kpti=0 nokaslr mitigations=off init_on_alloc=0"
+
+    static func fullKernelCommandLine(perf: Bool) -> String {
+        perf ? kernelCommandLine + " " + kernelPerfArguments : kernelCommandLine
+    }
 
     /// QEMU option values use ',' as separator; a literal comma is ",,".
     static func escape(_ path: String) -> String { path.replacingOccurrences(of: ",", with: ",,") }
@@ -115,7 +211,7 @@ struct QemuArgumentBuilder {
         if ramFile != nil { machineArg += ",memory-backend=ram0" }
         var a: [String] = [
             "-M", machineArg,
-            "-accel", accel.qemuValue,
+            "-accel", accel.qemuValue(tbSizeMB: tbSizeMB),
             "-cpu", cpu,
             "-smp", "\(cpuCount)",
             "-m", "\(memoryMB)",
@@ -133,7 +229,7 @@ struct QemuArgumentBuilder {
             "-serial", "chardev:vaconsole",
             "-kernel", kernel.path,
             "-initrd", initrd.path,
-            "-append", Self.kernelCommandLine,
+            "-append", Self.fullKernelCommandLine(perf: kernelPerf),
         ]
         // Order matters: it fixes the virtio-mmio addresses the image's fstab
         // expects (vendor a003e00, metadata a003c00, userdata a003a00,

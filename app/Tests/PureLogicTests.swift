@@ -20,8 +20,33 @@ if args.count >= 3 {
     let swift = try Data(contentsOf: out)
     check(swift == python, "initrd differs from make_initrd.py (\(swift.count) vs \(python.count) bytes)")
     check(String(decoding: swift.suffix(12), as: UTF8.self) == "#BOOTCONFIG\n", "trailer magic")
+    check(swift.range(of: Data("androidboot.logcat=\"*:I\"\n".utf8)) != nil, "logcat at info level")
+    check(swift.range(of: Data("ro.hw_timeout_multiplier=5\n".utf8)) != nil, "debug prop (literal lz4 block)")
+    check(swift.range(of: Data("dalvik.vm.usejit".utf8)) == nil, "the JIT stays on")
+    let bt = "ro.bluetooth.ble_start_timeout_delay=20000\nro.bluetooth.ble_stop_timeout_delay=20000\n"
+    check(swift.range(of: Data(bt.utf8)) != nil, "Bluetooth BLE step timeouts")
+    check(swift.range(of: Data("bluetooth.framework.support_persisted_state=false\n".utf8)) != nil,
+          "no Bluetooth auto-enable at boot (the engine enables it)")
+    check(swift.range(of: Data("bluetooth.profile.a2dp".utf8)) == nil, "A2DP keeps the image's setting")
+    if args.count >= 4 {
+        // make_initrd.py --prebaked
+        let pythonPrebaked = try Data(contentsOf: URL(fileURLWithPath: args[3]))
+        try BootConfig.buildInitrd(ramdisk: ramdisk, output: out, overrides: ["androidboot.qemu.skin": "1080x2340"],
+                                   prebaked: true)
+        let prebaked = try Data(contentsOf: out)
+        check(prebaked == pythonPrebaked, "prebaked initrd differs from make_initrd.py --prebaked " +
+                                          "(\(prebaked.count) vs \(pythonPrebaked.count) bytes)")
+        let props = "bluetooth.profile.pbap.server.enabled=false\n" +
+                    "ro.bluetooth.ble_start_timeout_delay=20000\nro.bluetooth.ble_stop_timeout_delay=20000\n" +
+                    "ro.hw_timeout_multiplier=5\n"
+        check(prebaked.range(of: Data(props.utf8)) != nil, "prebaked adb_debug.prop")
+        check(prebaked.range(of: Data("dalvik.vm.usejit".utf8)) == nil, "prebaked: the JIT stays on")
+        check(prebaked.range(of: Data("pm.dexopt".utf8)) == nil, "prebaked: the image's dexopt filters")
+    }
     try? FileManager.default.removeItem(at: out)
 }
+check(BootConfig.debugProperties(prebaked: false) == BootConfig.debugProps, "default debug props")
+check(BootConfig.debugProperties(prebaked: true) == BootConfig.debugProps, "prebaked: no extra props")
 
 // MARK: DisplayGeometry: corner UVs and touch mapping are inverse of each other.
 for k in 0..<4 {
@@ -86,7 +111,31 @@ check(snapArgv.suffix(3) == ["-S", "-incoming", "defer"] || snapArgv.contains("d
 b.incomingDefer = false
 check(SnapshotHash.argvHash(snapArgv, replacing: []) == SnapshotHash.argvHash(b.build(), replacing: []), "restore argv hashes like the cold-boot argv")
 check(QemuArgumentBuilder.escape("/a,b") == "/a,,b", "comma escape")
+// Kernel command line (as tools/run-macos.sh; -VAKernelPerf NO / VA_KERNEL_PERF=0 drop the perf words).
+let cmdline = argv[argv.firstIndex(of: "-append")! + 1]
+check(QemuArgumentBuilder.kernelPerfArguments == "kpti=0 nokaslr mitigations=off init_on_alloc=0", "kernel perf args")
+check(cmdline == QemuArgumentBuilder.kernelCommandLine + " kpti=0 nokaslr mitigations=off init_on_alloc=0",
+      "kernel cmdline: \(cmdline)")
+check(cmdline.hasPrefix("8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ") &&
+      cmdline.contains(" loop.max_loop=64 ") && cmdline.contains(" bootconfig"), "kernel cmdline base")
+var bp = b
+bp.kernelPerf = false
+let plain = bp.build()
+check(plain[plain.firstIndex(of: "-append")! + 1] == QemuArgumentBuilder.kernelCommandLine, "kernel perf args off")
+check(argv[argv.firstIndex(of: "-smp")! + 1] == "4", "4 vCPUs by default")
+bp.cpuCount = 2
+let smp2 = bp.build()
+check(smp2[smp2.firstIndex(of: "-smp")! + 1] == "2", "-VACPUCount")
 check(AccelMode.tcti.qemuValue == "tcg,thread=multi,tb-size=512", "tcti accel")
+check(AccelMode.tcti.qemuValue(tbSizeMB: 1536) == "tcg,thread=multi,tb-size=1536", "tcti tb-size")
+check(AccelMode.tctiTBSizeMB(availableMB: 3000, guestMB: 2048) == 512, "tcti tb-size floor")
+check(AccelMode.tctiTBSizeMB(availableMB: 5000, guestMB: 2048) == 1280, "tcti tb-size from available memory")
+check(AccelMode.tctiTBSizeMB(availableMB: 9000, guestMB: 2048) == 2048, "tcti tb-size cap")
+var btb = b
+btb.accel = .tcti
+btb.tbSizeMB = 1792
+let tbArgv = btb.build()
+check(tbArgv[tbArgv.firstIndex(of: "-accel")! + 1] == "tcg,thread=multi,tb-size=1792", "builder tb-size")
 
 // MARK: Keymap spot checks (HID usage -> Linux).
 check(LinuxKeymap.keycode(forHIDUsage: 0x04) == 30, "A")
@@ -276,6 +325,17 @@ do {
     let a2 = ["-M", "ranchu,snapshot-dir=/C2/snap", "-chardev", "socket,id=qmp0,fd=9", "-mon", "chardev=qmp0,mode=control", "-m", "2048", "-S", "-incoming", "defer"]
     check(SnapshotHash.argvHash(a1, replacing: [("/C1", "$ROOT")]) == SnapshotHash.argvHash(a2, replacing: [("/C2", "$ROOT")]), "argv hash normalized")
     check(SnapshotHash.argvHash(a1, replacing: []) != SnapshotHash.argvHash(a1.map { $0 == "2048" ? "4096" : $0 }, replacing: []), "argv hash sensitive")
+    // ...and across code buffer sizes (host-side only), but not other accel options.
+    let t1 = ["-accel", "tcg,thread=multi,tb-size=512", "-m", "2048"]
+    let t2 = ["-accel", "tcg,thread=multi,tb-size=1792", "-m", "2048"]
+    let t3 = ["-accel", "tcg,thread=single,tb-size=512", "-m", "2048"]
+    check(SnapshotHash.argvHash(t1, replacing: []) == SnapshotHash.argvHash(t2, replacing: []), "argv hash ignores tb-size")
+    check(SnapshotHash.argvHash(t1, replacing: []) != SnapshotHash.argvHash(t3, replacing: []), "argv hash keeps accel options")
+    // ...and JIT (split-wx) vs TCTI: one snapshot for both engines.
+    let jitArgv = ["-accel", AccelMode.tcgJIT(splitWX: true).qemuValue, "-m", "2048"]
+    let tctiArgv = ["-accel", AccelMode.tcti.qemuValue(tbSizeMB: 1536), "-m", "2048"]
+    check(SnapshotHash.argvHash(jitArgv, replacing: []) == SnapshotHash.argvHash(tctiArgv, replacing: []),
+          "argv hash is the same for the JIT and TCTI engines")
 
     // Image identity: content of small files and size/mtime of large ones.
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("va-snap-test-\(getpid())")
@@ -291,6 +351,33 @@ do {
     try? FileManager.default.removeItem(at: dir)
 } catch {
     check(false, "snapshot tests threw \(error)")
+}
+
+// MARK: JIT decision (QemuEngine.jitDecision)
+do {
+    func d(enabled: Bool = true, sim: Bool = false, avail: Bool = true, attached: Bool = true, needs: Bool = true,
+           jit: Bool = true, tcti: Bool = true, failed: Bool = false) -> JITDecision {
+        JITDecision.decide(enabled: enabled, simulator: sim, jitAvailable: avail, debuggerAttached: attached,
+                           needsDebugger: needs, jitEngineEmbedded: jit, tctiEngineEmbedded: tcti, lastStartFailed: failed)
+    }
+    let stik = d()
+    check(stik.useJIT && stik.reason == .debugger && !stik.releaseDebugger, "StikDebug launch -> JIT, debugger kept for the engine")
+    let off = d(enabled: false)
+    check(!off.useJIT && off.reason == .disabled && off.releaseDebugger, "option off -> TCTI and release StikDebug")
+    let plain = d(avail: false, attached: false)
+    check(!plain.useJIT && plain.reason == .noDebugger && !plain.releaseDebugger, "normal launch -> TCTI, nothing to release")
+    let crashed = d(failed: true)
+    check(!crashed.useJIT && crashed.reason == .lastStartFailed && crashed.releaseDebugger, "failed JIT start -> TCTI once")
+    let oldIOS = d(avail: true, attached: false, needs: false)
+    check(oldIOS.useJIT && !oldIOS.releaseDebugger, "pre-iOS 26: CS_DEBUGGED alone is enough")
+    let xcode = d(avail: true, attached: true, needs: false, failed: true)
+    check(!xcode.useJIT && !xcode.releaseDebugger, "no TXM: never brk at a debugger that is not waiting for it")
+    check(d(sim: true, avail: true, attached: false, needs: false).useJIT, "simulator -> JIT")
+    check(!d(enabled: false, sim: true, needs: false).useJIT, "simulator, option off, TCTI embedded -> TCTI")
+    check(d(enabled: false, sim: true, needs: false, tcti: false).useJIT, "simulator without TCTI -> JIT anyway")
+    let tctiOnly = d(jit: false)
+    check(!tctiOnly.useJIT && tctiOnly.reason == .noJITEngine && tctiOnly.releaseDebugger, "TCTI-only build")
+    check(!d(avail: false, attached: false, tcti: false).useJIT, "JIT-only build without a debugger: nothing runs")
 }
 
 print(failures == 0 ? "all \(checks) pure-logic checks passed" : "\(failures) of \(checks) checks failed")

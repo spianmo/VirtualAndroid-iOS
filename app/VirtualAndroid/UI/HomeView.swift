@@ -19,7 +19,8 @@ struct HomeView: View {
                     }
                     .padding(.vertical, 4)
                     Button {
-                        vm.boot()
+                        // During the StikDebug wait, Start means "go now, without JIT".
+                        if vm.waitingForJIT { vm.skipJITWait() } else { vm.boot() }
                     } label: {
                         Label(vm.resolvedEngineKind == .qemu ? "Start Android" : "Start stub engine",
                               systemImage: "play.fill")
@@ -65,12 +66,34 @@ struct HomeView: View {
                     Text("An image pack holds kernel-ranchu, ramdisk.img, system.img, vendor.img, encryptionkey, userdata.qcow2 and cache.qcow2 (made on a Mac by app/scripts/make_userdata_qcow2.sh). Put it in Documents/ImagePack or import a folder.")
                 }
 
-                Section("Engine") {
+                Section {
                     Picker("Engine", selection: $vm.engineKind) {
                         ForEach(EngineKind.allCases) { Text($0.label).tag($0) }
                     }
                     LabeledContent("Selected", value: vm.resolvedEngineKind.label)
                     Text(vm.engineSummary).font(.footnote).foregroundStyle(.secondary)
+                    Toggle("JIT when opened from StikDebug", isOn: $vm.jitEnabled)
+                    Label(vm.jitSummary, systemImage: vm.jitSummary.hasPrefix("JIT") ? "bolt.fill" : "tortoise.fill")
+                        .font(.footnote)
+                        .foregroundStyle(vm.jitSummary.hasPrefix("JIT") ? .green : .secondary)
+                    if vm.jitOptionPendingRelaunch {
+                        Text("Takes effect the next time VirtualAndroid is opened.")
+                            .font(.footnote).foregroundStyle(.orange)
+                    }
+                    if vm.waitingForJIT {
+                        Button("Start without JIT") { vm.skipJITWait() }
+                    } else if vm.canRequestJIT && vm.stikDebugInstalled {
+                        Button {
+                            vm.requestJITFromStikDebug { vm.boot() }
+                        } label: {
+                            Label("Enable JIT with StikDebug and start", systemImage: "bolt.badge.automatic")
+                        }
+                    }
+                    Toggle("Ask StikDebug for JIT when opened from the home screen", isOn: $vm.jitAskStikDebug)
+                } header: {
+                    Text("Engine")
+                } footer: {
+                    Text("JIT runs Android several times faster than the TCTI interpreter, apps included. iOS only allows it while a debugger enables it. Needs StikDebug with LocalDevVPN on and the pairing file imported. Opened from the home screen, VirtualAndroid asks StikDebug to attach (universal.js) before it starts; opened from StikDebug, assign universal.js to VirtualAndroid there. Without a debugger the app uses TCTI with the AOT cache. The snapshot works with both.")
                 }
 
                 Section("Options") {

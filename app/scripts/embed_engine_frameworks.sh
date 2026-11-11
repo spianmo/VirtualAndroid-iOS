@@ -28,6 +28,13 @@ esac
 
 mkdir -p "$DEST"
 shopt -s nullglob
+# Engine frameworks that are optional (secondary TCTI engine, AOT cache): an
+# incremental build keeps whatever an earlier build embedded, so remove them
+# first; they are copied again below if the sources still have them. A stale
+# va_aot next to a rebuilt QEMU, or an old TCTI engine, must never be picked up.
+for name in qemu-aarch64-softmmu-tcti.framework va_aot.framework; do
+  rm -rf "${DEST:?}/$name"
+done
 count=0
 qemu_backends=""
 IFS=':' read -r -a dirs <<< "$SRCS"

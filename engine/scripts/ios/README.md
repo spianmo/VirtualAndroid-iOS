@@ -129,8 +129,13 @@ unix socket paths must stay under 104 bytes.
   does not use it.)
 * Device, TCTI build: no JIT, no special entitlement; the code buffer is plain RW.
 * Device, JIT build (StikDebug/sideloaded): needs a debugger attached at launch
-  (`get-task-allow`; QEMU's iOS 26/TXM path does `brk #0x69` so the debugger
-  prepares the region) or TrollStore `dynamic-codesigning`. Not built by default.
+  (`get-task-allow`) and, on iOS 26+ with TXM, still attached while QEMU
+  allocates its code buffer: `tcg/region.c` asks it to prepare the RX view
+  (StikDebug `legacy.js` `brk #0x69` or `universal.js` `brk #0xf00d`), checks
+  every page, then tells it to detach (docs/JIT.md). Or TrollStore
+  `dynamic-codesigning`. `build_qemu.sh -p ios -b tcg` builds it;
+  `make_xcframeworks.sh --device-backend tcg+tcti` ships it next to the TCTI
+  engine.
 * Memory (device): guest RAM 2 GB + TB buffer (tb-size, 1 GB in run-macos.sh;
   use 256-512 MB on device) need `com.apple.developer.kernel.increased-memory-limit`
   and `com.apple.developer.kernel.extended-virtual-addressing` (UTM's iOS.entitlements).

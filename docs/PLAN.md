@@ -93,6 +93,9 @@ iOS App：点开即进入完整的 Android 13（AOSP，arm64）桌面。整机�
     拿到 10.0.2.16、VALIDATED；开机后引擎关闭 captive portal 探测（探测目标是 Google 服务器）。
   - 蓝牙：`va-bluetooth`（virtio-serial 端口 "bluetooth" 上的 HCI 控制器，命令表由 hci_packets.pdl 生成），
     蓝牙能开启、扫描正常结束（无真实无线电，扫不到设备，连接按寻呼超时失败）。
+    TCTI 下：适配器启动 profile 的时限固定 4 s，开机时排不上，每次超时都会让 BluetoothManagerService 重启蓝牙进程、无限循环。
+    现在 initrd 把 BLE 步骤时限放到 20 s，关掉只服务远端设备的 OPP/PBAP/MAP/PAN，开机时 Android 不自动开蓝牙；
+    改由引擎在开机完成、客户机空闲后经控制台打开（用户关掉的保持关闭）。
   - 音频：`virtio-sound-pci` + 引擎 `va` 音频后端（va_host.h 的 speaker/mic 回调），扬声器实时 48 kHz、无欠载，
     麦克风实时采集；virtio-snd 支持快照（停机时完成在途缓冲，恢复后继续播放）。
   - IMU/GPS：加速度计、陀螺仪、磁力计、气压及 Android 融合出的重力/旋转矢量都有事件；GNSS 有定位。
@@ -101,6 +104,10 @@ iOS App：点开即进入完整的 Android 13（AOSP，arm64）桌面。整机�
 - **M4 秒开**：首启建盘、整机快照保存/恢复，冷启动之后再开 App 几秒进桌面。
 - **M5 真机无 JIT 性能**：TCTI 构建 + AOT 翻译缓存（离线录制热点 TB → 编译成签名代码 → 运行时按内容哈希命中）。
 - **M6 真机**：签名、权限、内存权限、iPhone 实测（需要 Apple 开发者账号）。
+- **M7 真机 JIT（StikDebug）** ✅ 2026-11-11：App 同时内置 JIT 引擎和 TCTI+AOT 引擎，启动时按是否有调试器选择（默认开，可关）。
+  iOS 26+/TXM 下调试器必须在 QEMU 分配代码缓冲时仍在附加并逐页写一次，引擎兼容 StikDebug 的 universal.js（`brk #0xf00d`）和 legacy.js（`brk #0x69`），
+  准备完让调试器分离；从主屏打开时 App 自动通过 `stikjit://` 请求 StikDebug 附加。iPhone 17 Pro Max 实测：JIT 冷启动 83 s 到 boot_completed，
+  第三方应用冷启动比 TCTI+AOT 快约 2 倍（小红书 26.7 → 13.6 s，酷安 35.4 → 16.8 s），JIT 与 TCTI 共用同一快照。详见 `docs/JIT.md`。
 
 ## AOT 设计要点（M5）
 - ARM 目标开启 CF_PCREL，TB 只与 物理页内偏移+flags+cs_base+cflags 有关 → key = hash(客户机指令字节, 页内偏移, flags, cs_base, cflags)。

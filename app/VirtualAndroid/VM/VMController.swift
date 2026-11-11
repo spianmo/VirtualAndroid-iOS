@@ -47,6 +47,13 @@ final class VMController: ObservableObject, EngineDelegate {
     }
     @Published var keepRunningInBackground: Bool { didSet { defaults.set(keepRunningInBackground, forKey: Keys.background) } }
     @Published var showNavControls: Bool { didSet { defaults.set(showNavControls, forKey: Keys.nav) } }
+    /// JIT when the app is opened from StikDebug (default on); takes effect at the next launch.
+    @Published var jitEnabled: Bool { didSet { defaults.set(jitEnabled, forKey: QemuEngine.jitSettingKey) } }
+    /// Opened without a debugger: ask StikDebug to attach before auto-booting (default on).
+    @Published var jitAskStikDebug: Bool { didSet { defaults.set(jitAskStikDebug, forKey: Keys.jitAsk) } }
+    /// Between opening StikDebug's URL and its debugger attaching (or giving up).
+    @Published private(set) var waitingForJIT = false
+    private var jitWaitNext: (() -> Void)?
     let navStartsExpanded: Bool
 
     let host = HostBridge()
@@ -79,12 +86,17 @@ final class VMController: ObservableObject, EngineDelegate {
         static let forceOrientation = "VAForceOrientation", selfTest = "VASelfTest"
         static let stubDiagnostics = "VAStubDiagnostics"
         static let adbPort = "VAAdbPort", trace = "VATrace", dumpFrames = "VADumpFrames"
+        static let cpuCount = "VACPUCount"   // -smp (A/B; default 4)
+        // Initrd profile override (A/B): YES/NO instead of "prebaked when the VM's
+        // disks came from a prebaked pack". A change makes odrefresh recompile.
+        static let prebaked = "VAPrebaked"
+        static let jitAsk = "VAJITAskStikDebug"   // ask StikDebug for JIT when opened normally
         static let statusLog = "VAStatusLog"   // seconds: log every bridge's status line periodically
         static let script = "VAScript"   // after boot: "wait:5;tap:0.5,0.9;wait:3;key:172"     // e.g. "gnss,camera,mic,tone,sensors,vibrate,copy"
     }
 
     init() {
-        defaults.register(defaults: [Keys.autoBoot: true, Keys.nav: true, Keys.fastResume: true])
+        defaults.register(defaults: [Keys.autoBoot: true, Keys.nav: true, Keys.fastResume: true, Keys.jitAsk: true])
         engineKind = EngineKind(rawValue: defaults.string(forKey: Keys.engine) ?? "") ?? .auto
         autoBoot = defaults.bool(forKey: Keys.autoBoot)
         fastResume = defaults.bool(forKey: Keys.fastResume)
@@ -92,6 +104,8 @@ final class VMController: ObservableObject, EngineDelegate {
         clipboardAutoSync = defaults.bool(forKey: Keys.clipboard)
         keepRunningInBackground = defaults.bool(forKey: Keys.background)
         showNavControls = defaults.bool(forKey: Keys.nav)
+        jitEnabled = QemuEngine.jitEnabled
+        jitAskStikDebug = defaults.bool(forKey: Keys.jitAsk)
         navStartsExpanded = defaults.bool(forKey: Keys.navExpanded)
 
         displayView.rotationMode = rotationMode
@@ -103,9 +117,13 @@ final class VMController: ObservableObject, EngineDelegate {
             self.engine?.setDisplayRotation(degrees)
         }
         refreshImageState()
+        // Before anything else touches the engine: the JIT decision samples whether
+        // StikDebug's debugger is attached, and the engine detaches it later.
+        let jitLines = QemuEngine.prepareJITAtLaunch()
         log(1, "VirtualAndroid \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "?"), " +
-               "simulator=\(va_runtime_is_simulator()) jit=\(va_runtime_jit_available()) " +
+               "simulator=\(va_runtime_is_simulator()) jit=\(QemuEngine.jitDecision.useJIT) " +
                "mem=\(va_runtime_available_memory() >> 20) MB qemuFramework=\(QemuEngine.isAvailable)")
+        jitLines.forEach { log(1, $0) }
     }
 
     // MARK: Derived state
@@ -121,10 +139,11 @@ final class VMController: ObservableObject, EngineDelegate {
         kind == .qemu ? QemuEngine.supportsSnapshots : true
     }
 
-    /// `.auto` -> QEMU only when the frameworks are embedded and an image is installed.
+    /// `.auto` -> QEMU only when the frameworks are embedded and an image is installed
+    /// (a JIT-only build without a debugger counts: StikDebug can still attach).
     var resolvedEngineKind: EngineKind {
         switch engineKind {
-        case .auto: return QemuEngine.isAvailable && imageInstalled ? .qemu : .stub
+        case .auto: return (QemuEngine.isAvailable || canRequestJIT) && imageInstalled ? .qemu : .stub
         default: return engineKind
         }
     }
@@ -134,11 +153,21 @@ final class VMController: ObservableObject, EngineDelegate {
             let accel: String
             switch sel.accel {
             case .tcgJIT(let wx): accel = wx ? "TCG JIT (split-wx)" : "TCG JIT"
-            case .tcti: accel = "TCTI (no JIT)"
+            case .tcti: accel = QemuEngine.aotLibraryPath != nil ? "TCTI + AOT cache (no JIT)" : "TCTI (no JIT)"
             }
             return "QEMU framework present · \(accel)"
         }
         return "QEMU unavailable: \(QemuEngine.unavailableReason)"
+    }
+
+    /// This launch's translator, for the start screen.
+    var jitSummary: String {
+        waitingForJIT ? "Waiting for StikDebug to attach (it switches back here when done)" : QemuEngine.jitDecision.summary
+    }
+    /// The option differs from what this launch runs (it is fixed at launch).
+    var jitOptionPendingRelaunch: Bool {
+        let d = QemuEngine.jitDecision
+        return jitEnabled != (d.reason != .disabled) && d.reason != .noJITEngine
     }
 
     var stubDiagnostics: StubDiagnostics? { engine as? StubDiagnostics }
@@ -165,12 +194,95 @@ final class VMController: ObservableObject, EngineDelegate {
             return
         }
         if autoBoot, resolvedEngineKind == .stub || imageInstalled {
-            boot()
+            // Every launch asks (the user turns it off with the start screen
+            // toggle); without an answer the app boots TCTI after 20 s in front.
+            if resolvedEngineKind == .qemu, jitAskStikDebug, canRequestJIT {
+                requestJITFromStikDebug { [weak self] in self?.boot() }
+            } else {
+                boot()
+            }
         }
     }
 
+    // MARK: JIT via StikDebug (docs/JIT.md)
+
+    /// JIT is wanted but this process has no debugger, and QEMU has not run yet:
+    /// StikDebug can still attach to it (URL scheme with our pid and universal.js).
+    var canRequestJIT: Bool {
+        QemuEngine.jitDecision.reason == .noDebugger && jitEnabled && QemuEngine.jitEngineEmbedded &&
+            !QemuEngine.lastJITStartFailed && !QemuEngine.engineStartedInProcess && engine == nil &&
+            !va_runtime_is_simulator()
+    }
+
+    /// StikDebug is installed (its URL scheme is registered).
+    var stikDebugInstalled: Bool { UIApplication.shared.canOpenURL(URL(string: "stikjit://")!) }
+
+    /// Opens StikDebug to attach to this process with universal.js, waits until the
+    /// debugger is attached (or 20 s back in the app without it), then calls `next`
+    /// (which boots with JIT or, without the debugger, with TCTI).
+    func requestJITFromStikDebug(then next: (() -> Void)? = nil) {
+        guard canRequestJIT, !waitingForJIT else { next?(); return }
+        let url = QemuEngine.stikDebugJITURL
+        waitingForJIT = true
+        jitWaitNext = next
+        bootMessage = "Waiting for StikDebug to enable JIT"
+        log(1, "JIT: asking StikDebug to attach: \(url.absoluteString)")
+        UIApplication.shared.open(url, options: [:]) { [weak self] opened in
+            guard let self else { return }
+            guard opened else {
+                self.log(1, "JIT: StikDebug did not open (not installed?); using TCTI")
+                self.finishJITWait()
+                return
+            }
+            self.pollJITDebugger(activeTicks: 0)
+        }
+    }
+
+    /// Boot now without waiting for StikDebug (start screen button).
+    func skipJITWait() {
+        guard waitingForJIT else { return }
+        log(1, "JIT: wait for StikDebug skipped")
+        finishJITWait()
+    }
+
+    private func pollJITDebugger(activeTicks: Int) {
+        guard waitingForJIT else { return }
+        let probeBefore = QemuEngine.jitProbe.attached
+        let decision = QemuEngine.refreshJITDecision()
+        if decision.useJIT {
+            log(1, "JIT: StikDebug's debugger is attached")
+            finishJITWait()
+            return
+        }
+        if probeBefore != QemuEngine.jitProbe.attached || decision.reason != .noDebugger {
+            // A debugger came (and was released) but this launch cannot use it,
+            // e.g. the last JIT start failed or the option was turned off.
+            log(1, "JIT: StikDebug attached, but this launch uses TCTI: \(decision.summary)")
+            finishJITWait()
+            return
+        }
+        // StikDebug first switches back to us, then its script attaches; count only
+        // the time we are in front again.
+        let ticks = activeTicks + (UIApplication.shared.applicationState == .active ? 1 : 0)
+        if ticks >= 40 {
+            log(1, "JIT: no debugger 20 s after returning from StikDebug; using TCTI")
+            finishJITWait()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.pollJITDebugger(activeTicks: ticks)
+        }
+    }
+
+    private func finishJITWait() {
+        waitingForJIT = false
+        let next = jitWaitNext
+        jitWaitNext = nil
+        next?()
+    }
+
     func boot() {
-        guard engine == nil, phase != .installing else { return }
+        guard engine == nil, phase != .installing, !waitingForJIT else { return }
         lastError = nil
         bootSeconds = nil
         bootProgress = 0
@@ -179,6 +291,8 @@ final class VMController: ObservableObject, EngineDelegate {
         var cfg = VMLaunchConfig()
         cfg.storage = storage
         if let machine = defaults.string(forKey: Keys.machine), !machine.isEmpty { cfg.machine = machine }
+        let cpus = defaults.integer(forKey: Keys.cpuCount)
+        if (1...8).contains(cpus) { cfg.cpuCount = cpus }
         let port = defaults.integer(forKey: Keys.adbPort)
         #if targetEnvironment(simulator)
         cfg.adbPort = port > 0 ? port : 5570
@@ -245,7 +359,15 @@ final class VMController: ObservableObject, EngineDelegate {
         switch kind {
         case .qemu:
             do {
-                try storage.prepareVM(bootOverrides: QemuEngine.bootOverrides(config: cfg))
+                let override = defaults.object(forKey: Keys.prebaked) != nil ? defaults.bool(forKey: Keys.prebaked) : nil
+                let prebaked = try storage.prepareVM(bootOverrides: QemuEngine.bootOverrides(config: cfg),
+                                                     prebaked: override)
+                log(1, "userdata: \(storage.vmUserdataKind ?? "empty"), initrd profile " +
+                       (prebaked ? "prebaked" : "default"))
+                if storage.isPrebakedImage && !storage.isPrebakedVM {
+                    log(2, "the image pack has a prebaked userdata (\(storage.imageUserdataKind ?? "")), " +
+                           "this VM's disks predate it: Reset Android data to use it")
+                }
                 if cfg.snapshotMode { try snapshots.prepareDirectory() }
             } catch {
                 fail(error.localizedDescription)
@@ -639,7 +761,17 @@ final class VMController: ObservableObject, EngineDelegate {
             self.activeEngine = nil
             self.endBackgroundTask()
             let wasRestoring = self.lifecycle.state == .restoring
-            if wasRestoring {
+            let neverLoaded = wasRestoring && !((engine as? QemuEngine)?.restoreStreamRequested ?? true)
+            if neverLoaded {
+                // QEMU died in qemu_init (e.g. the JIT code buffer could not be
+                // prepared) before it read the snapshot: keep the snapshot; the next
+                // launch restores it (with TCTI, see the JIT start marker).
+                self.log(2, "engine exited before loading the snapshot; snapshot kept")
+                self.lifecycle = VMLifecycle()
+                self.relaunchRequired = true
+                self.lastError = (message ?? "Engine exited during start") +
+                    ". The snapshot was kept; relaunch the app to restore it."
+            } else if wasRestoring {
                 // QEMU exited during the load (e.g. exit() on a bad stream).
                 self.send(.restoreFailed(message ?? "engine exited during restore"))
             } else {

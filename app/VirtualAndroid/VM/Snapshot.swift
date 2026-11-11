@@ -441,7 +441,10 @@ enum SnapshotHash {
     }
 
     /// argv identity: replaces volatile prefixes (container/bundle paths can
-    /// move between installs) and drops per-launch options (QMP fd, -incoming, -S).
+    /// move between installs) and drops per-launch options (QMP fd, -incoming, -S)
+    /// and the host-side TCG options: code buffer size (it follows available
+    /// memory) and split-wx (on with the JIT engine, absent with TCTI), so a
+    /// snapshot moves between the JIT and TCTI engines.
     static func argvHash(_ argv: [String], replacing prefixes: [(String, String)]) -> String {
         var out: [String] = []
         var i = 0
@@ -455,6 +458,10 @@ enum SnapshotHash {
                 continue
             }
             var s = a
+            if i > 0, argv[i - 1] == "-accel" {
+                s = s.split(separator: ",").filter { !$0.hasPrefix("tb-size=") && !$0.hasPrefix("split-wx=") }
+                    .joined(separator: ",")
+            }
             for (prefix, token) in prefixes where !prefix.isEmpty {
                 s = s.replacingOccurrences(of: prefix, with: token)
             }

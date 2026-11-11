@@ -20,13 +20,38 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>stikjit</string>
+		<string>stikdebug</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Android apps running in VirtualAndroid asked to use the camera. Frames go to the virtual Android camera only while an Android app has it open.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>The virtual Android device uses your network for internet access, and developers can connect to it with adb.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Android apps running in VirtualAndroid asked for your location. It goes to the virtual Android GPS only while Android has location turned on.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Android apps running in VirtualAndroid asked to record audio. Sound goes to the virtual Android microphone only while an Android app is recording.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Android apps running in VirtualAndroid use the motion and pressure sensors (accelerometer, gyroscope, compass, barometer).</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
 	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiredDeviceCapabilities</key>
@@ -34,6 +59,10 @@
 		<string>arm64</string>
 		<string>metal</string>
 	</array>
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<key>UIStatusBarHidden</key>
+	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -47,31 +76,7 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>UIRequiresFullScreen</key>
-	<true/>
-	<key>UIStatusBarHidden</key>
-	<true/>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>audio</string>
-	</array>
-	<key>UIFileSharingEnabled</key>
-	<true/>
-	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<true/>
-	<key>NSCameraUsageDescription</key>
-	<string>Android apps running in VirtualAndroid asked to use the camera. Frames go to the virtual Android camera only while an Android app has it open.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Android apps running in VirtualAndroid asked to record audio. Sound goes to the virtual Android microphone only while an Android app is recording.</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Android apps running in VirtualAndroid asked for your location. It goes to the virtual Android GPS only while Android has location turned on.</string>
-	<key>NSMotionUsageDescription</key>
-	<string>Android apps running in VirtualAndroid use the motion and pressure sensors (accelerometer, gyroscope, compass, barometer).</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>The virtual Android device uses your network for internet access, and developers can connect to it with adb.</string>
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
 </dict>
 </plist>

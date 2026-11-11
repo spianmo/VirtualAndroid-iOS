@@ -23,6 +23,17 @@ Device: set `DEVELOPMENT_TEAM` in project.yml. The entitlements
 `get-task-allow` (debugger attach = JIT via CS_DEBUGGED, e.g. Xcode/StikDebug).
 `-sdk iphoneos CODE_SIGNING_ALLOWED=NO` checks that it compiles without a team.
 
+JIT on a device (docs/JIT.md): build the engines with
+`engine/scripts/ios/make_xcframeworks.sh --device-backend tcg+tcti`; the app
+then embeds the JIT engine and the TCTI + AOT engine and picks JIT when a
+debugger (StikDebug, universal.js) is attached at launch. Start screen: "JIT
+when opened from StikDebug" (`VAJIT`, default on) and "Ask StikDebug for JIT
+when opened from the home screen" (`VAJITAskStikDebug`, default on). Developer
+switches: `-VAJIT NO` (TCTI for this launch), `-VAJIT26 auto|universal|legacy|none`
+(engine region protocol; `none` under Xcode's debugger, which stops on the
+brk; on a TXM device it means no JIT). The engine's stderr goes to
+`vms/default/qemu.out` on the device (`-VAStderrConsole YES` keeps the console).
+
 ## Engines
 
 `Engine/Engine.swift` defines `VMEngine` (lifecycle) + `EngineInput`
@@ -50,7 +61,13 @@ embeds every xcframework from `engine/build-ios/xcframeworks` and
 `gfx/build-ios-xcframeworks` (slice for the SDK) and writes
 `VAEngineBackend.txt` (`tcg` = JIT, `tcti`) from `qemu-backends.txt`; the app
 uses `-accel tcg,thread=multi,tb-size=1024` (simulator), `...,tb-size=512,split-wx=on`
-(device + JIT) or `...,tb-size=512` (TCTI). A JIT build is refused when the
+(device + JIT) or, for TCTI, a code buffer sized from `os_proc_available_memory()` at
+launch: everything above the 2 GB guest and a 1.5 GB reserve, 512-2048 MB in 256 MB
+steps (`AccelMode.tctiTBSizeMB`; logged as "TCG code buffer N MB"). TCTI streams are
+big: a boot plus ten minutes of UI fills about 1 GB, and a full buffer is a `tb_flush`
+(all vCPUs stop, all code including AOT hits is translated again). The buffer is plain
+anonymous memory, so only the used part counts. `-VATBSizeMB N` forces a size; the size
+is not part of the snapshot identity. A JIT build is refused when the
 process cannot JIT. `VA_STUB_ONLY=1` skips embedding. QEMU can run once per
 process (globals); a second boot asks to relaunch.
 
@@ -82,9 +99,17 @@ writable disks + initrd + logs live in `.../vms/default/` (excluded from backup)
 The initrd is the ramdisk + bootconfig (`VM/BootConfig.swift`, byte-identical
 port of `tools/make_initrd.py`), with `androidboot.opengles.version` from
 `va_gfx_get_gles_version()` (cached from the previous run; 196608 = GLES 3.0
-for ANGLE Metal otherwise). QEMU argv (`VM/QemuArguments.swift`) mirrors
+for ANGLE Metal otherwise), plus `/adb_debug.prop` (`ro.hw_timeout_multiplier=5`;
+Bluetooth: `ro.bluetooth.ble_start/stop_timeout_delay=20000`, the peer-only OPP/PBAP/MAP/PAN
+profiles off and `bluetooth.framework.support_persisted_state=false`, so the adapter's fixed
+4 s profile start-up fits under TCTI and Android does not turn Bluetooth on during boot;
+see `tools/make_initrd.py`; the
+opt-in prebaked profile, `buildInitrd(..., prebaked: true)` = `make_initrd.py --prebaked`,
+is for a userdata compiled ahead of time on the Mac and currently adds nothing: it used to
+turn the JIT off and compile installs with `speed`, which left apps installed later interpreted
+or past installd's 570 s dex2oat limit, see docs/AOT.md "Third-party apps"). QEMU argv (`VM/QemuArguments.swift`) mirrors
 `tools/run-macos.sh --machine ranchu`: `-M ranchu,gfx-lib=...` (override
-`-VAMachine virt`), cortex-a76, 4 vCPU, 2 GB, disks vendor/encrypt/userdata/
+`-VAMachine virt`), cortex-a76, 4 vCPU (`-VACPUCount N`), 2 GB, disks vendor/encrypt/userdata/
 cache/system in that order (writable ones qcow2), virtio net
 (no slirp adb forward on ranchu), rng, virtio-serial hvc0/hvc1 (logcat) into
 files, `-device va-vsock-pci,guest-cid=77,adb-port=<port>,pipe-port=5000`
@@ -99,12 +124,23 @@ binary; without Wi-Fi the bootconfig gets `qemu.virtiowifi=0`). Serial 0 is
 an engine-owned ringbuf (`-chardev ringbuf,id=vaconsole,logfile=serial.log`):
 the engine types on that console to sync the guest clock after a restore and,
 once per boot, to turn Android's captive-portal probe off (the probes go to
-Google servers; where those are blocked Wi-Fi would show "no internet"). adb: port 5570 on the
+Google servers; where those are blocked Wi-Fi would show "no internet") and, with
+`va-bluetooth`, to turn Bluetooth on once the booted guest is quiet (unless the user
+turned it off: Android still records `bluetooth_on`), to add a 1 GB zram swap
+(`-M ranchu,zram-size=MB`, 0 = none; the image's fstab has none, and a 2 GB guest
+running a big app thrashed until lowmemorykiller killed the app in the foreground), and
+to start a job that recompiles, with the `verify` filter and without installd's 570 s
+limit, apps whose install-time dexopt was killed (`dexopt-rescue=off` disables it; it
+logs `va-engine: dexopt: ...` to logcat; docs/AOT.md "Third-party apps"). adb: port 5570 on the
 simulator (it shares the Mac's loopback: `adb connect 127.0.0.1:5570`),
-off on devices unless `-VAAdbPort N`. Kernel command line: run-macos.sh's, with
-`mac80211_hwsim.radios=0` (the guest creates its one radio itself). Bootconfig:
-`opengles.version=196608` (ANGLE Metal GLES 3.0), `camera_protocol_ver=0`,
-`qemu.virtiowifi=1`, and for dev builds
+off on devices unless `-VAAdbPort N`. Kernel command line: run-macos.sh's plus
+`kpti=0 nokaslr mitigations=off init_on_alloc=0` (`QemuArgumentBuilder.kernelPerfArguments`:
+KASLR forces KPTI on, and with KPTI every kernel entry/exit writes TTBR1 with another
+ASID, which QEMU's softmmu answers with a full TLB flush; `-VAKernelPerf NO` boots
+without them), and `mac80211_hwsim.radios=0` (the guest creates its one radio itself).
+Bootconfig: `opengles.version=196608`
+(ANGLE Metal GLES 3.0), `camera_protocol_ver=0`, `qemu.virtiowifi=1`, `logcat=*:I` (hvc1 gets Info and
+up: ActivityManager, Choreographer "Skipped N frames", OpenGLRenderer "Davey!"), and for dev builds
 `androidboot.qemu.adb.pubkey` from `adbkey.pub` (Documents/adbkey.pub, else the
 image pack's copy, which `make_userdata_qcow2.sh --pack` takes from
 `~/.android/adbkey.pub`; `VA_NO_ADBKEY=1` for packs you give away).
@@ -233,7 +269,18 @@ guest requests after boot and log every bridge's status 6 s later),
 `-VASimulatorMic YES`, `-VASnapshotSupport YES|NO`, `-VAFastResume NO`, `-VAAdbPort N`, `-VATrace event,...`, `-VADumpFrames YES`
 (libva_gfx PNG dumps in vms/default/frames), `-VAStatusLog N` (every N s, log each bridge's
 status line, e.g. speaker underruns, to the os_log; read with `log show --info`), `-VAScript "wait:5;tap:0.31,0.74;key:172"`
-(after boot: guest-coordinate taps through the view mapping, keys). Pre-grant simulator permissions with
+(after boot: guest-coordinate taps through the view mapping, keys).
+`-VAEnv "K=V;K2=V2"` adds engine environment variables (e.g. an AOT op capture on the
+device: `QEMU_AOT_CAPTURE=cap.txt;QEMU_AOT_HOT=hot.txt`, paths relative to `vms/default`).
+A/B performance switches: `-VAAOT NO` (TCTI without the AOT cache),
+`-VAKernelPerf NO` (kernel command line without `kpti=0 nokaslr mitigations=off init_on_alloc=0`),
+`-VACPUCount N` (`-smp`, 1-8, default 4), `-VAvCPUQoS <spec>` (sets `VA_VCPU_QOS` for
+QEMU's TCG vCPU threads: `interactive|initiated|default|utility|background` for all
+vCPUs, or per index such as `0-1:interactive,2-3:utility`; default `initiated`, below
+the UIKit main thread; QEMU logs the class of each vCPU to stderr), `-VATBSizeMB N`
+(TCG code buffer, 64-4096 MB, instead of the TCTI default from available memory). The kernel and
+vCPU-count switches change the argv hash, so a snapshot taken with other values is
+discarded (cold boot). Pre-grant simulator permissions with
 `xcrun simctl privacy <udid> grant location|camera|microphone|motion dev.virtualandroid.app`
 and set a position with `xcrun simctl location <udid> set <lat>,<lon>`.
 Guest logs: `vms/default/{serial,logcat,hvc0}.log` in the app container.

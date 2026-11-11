@@ -79,6 +79,8 @@ final class QMPClient {
         execute(first.execute, arguments: first.jsonArguments) { [weak self] result in
             switch result {
             case .failure(let e):
+                // Keep "connection closed" recognizable: the engine died, nothing was executed.
+                if let q = e as? QMPError, case .closed = q { completion(q); return }
                 completion(QMPError.remote("\(first.execute): \(e.localizedDescription)"))
             case .success:
                 guard let self else { completion(QMPError.closed); return }

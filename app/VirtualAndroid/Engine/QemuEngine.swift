@@ -39,18 +39,23 @@ final class QemuEngine: VMEngine {
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Picks the QEMU build that can run in this process, or nil.
+    /// The JIT (tcg) engine binary, if embedded.
+    private static var jitEngineBinary: String? {
+        embeddedBackend == "tcti" ? nil : frameworkBinary(jitFramework)
+    }
+
+    /// The TCTI engine binary: the primary framework in a TCTI build, else the
+    /// secondary one (next to a JIT primary; VAEngineBackend.txt says tcg).
+    private static var tctiEngineBinary: String? {
+        embeddedBackend == "tcti" ? frameworkBinary(jitFramework) : frameworkBinary(tctiFramework)
+    }
+
+    /// Picks the QEMU build for this process (fixed at launch by `jitDecision`), or nil.
     static func selectFramework() -> (path: String, accel: AccelMode)? {
-        let jit = va_runtime_jit_available()
-        let splitWX = !va_runtime_is_simulator()
-        if !jit, let p = frameworkBinary(tctiFramework) { return (p, .tcti) }
-        if let p = frameworkBinary(jitFramework) {
-            switch embeddedBackend {
-            case "tcti": return (p, .tcti)
-            default: return jit ? (p, .tcgJIT(splitWX: splitWX)) : nil    // a JIT build needs JIT
-            }
+        if jitDecision.useJIT, let p = jitEngineBinary {
+            return (p, .tcgJIT(splitWX: !va_runtime_is_simulator()))
         }
-        if let p = frameworkBinary(tctiFramework) { return (p, .tcti) }
+        if let p = tctiEngineBinary { return (p, .tcti) }
         return nil
     }
 
@@ -58,7 +63,125 @@ final class QemuEngine: VMEngine {
         if frameworkBinary(jitFramework) == nil && frameworkBinary(tctiFramework) == nil {
             return "\(jitFramework).framework is not embedded"
         }
-        return "the embedded QEMU is a JIT (tcg) build but this process cannot JIT; attach a debugger or embed the TCTI build"
+        return "the embedded QEMU is a JIT (tcg) build but this process cannot JIT; open the app from StikDebug or embed the TCTI build"
+    }
+
+    // MARK: JIT (docs/JIT.md)
+
+    /// The JIT option (start screen; `-VAJIT NO` for one launch). Default on.
+    static let jitSettingKey = "VAJIT"
+    static var jitEnabled: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: jitSettingKey) == nil || d.bool(forKey: jitSettingKey)
+    }
+
+    /// Developer: `-VAJIT26 auto|universal|legacy|none` (engine VA_JIT26): how the
+    /// engine asks the debugger to prepare the code buffer on iOS 26+. `none`
+    /// for Xcode's debugger, which stops on the brk; then the app does not
+    /// release the debugger either.
+    static var jit26Protocol: String? {
+        guard let s = UserDefaults.standard.string(forKey: "VAJIT26"), !s.isEmpty else { return nil }
+        return s
+    }
+
+    /// Written before a JIT engine starts, removed once the guest is seen running.
+    /// Still there at launch: that JIT start crashed or hung (e.g. StikDebug ran a
+    /// script that did not prepare the code buffer), so this launch uses TCTI.
+    static var jitStartMarker: URL { VMStorage.default.root.appendingPathComponent("jit-start.pending") }
+
+    typealias JITProbe = (available: Bool, attached: Bool, csDebugged: Bool, needsDebugger: Bool)
+
+    private static func sampleJIT() -> JITProbe {
+        (va_runtime_jit_available(), va_runtime_debugger_attached(), va_runtime_cs_debugged(),
+         va_runtime_jit_needs_debugger())
+    }
+
+    /// The facts the decision was made from. Sampled at launch, and again by
+    /// `refreshJITDecision()` until the engine starts (P_TRACED changes as soon as
+    /// the engine detaches the debugger).
+    private(set) static var jitProbe: JITProbe = sampleJIT()
+
+    /// A JIT start marker was left by the previous launch (read once, then removed).
+    private static let jitLastStartFailed: Bool = {
+        let fm = FileManager.default
+        let failed = fm.fileExists(atPath: jitStartMarker.path)
+        if failed { try? fm.removeItem(at: jitStartMarker) }
+        return failed && !va_runtime_is_simulator()
+    }()
+
+    private static func decideJIT() -> JITDecision {
+        // -VAJIT26 none (Xcode's debugger, which would stop on the region brk):
+        // on a TXM device nothing prepares the code buffer, so no JIT.
+        let noRegionCall = jit26Protocol == "none" && jitProbe.needsDebugger
+        return JITDecision.decide(enabled: jitEnabled, simulator: va_runtime_is_simulator(),
+                           jitAvailable: jitProbe.available && !noRegionCall,
+                           debuggerAttached: jitProbe.attached && !noRegionCall,
+                           needsDebugger: jitProbe.needsDebugger,
+                           jitEngineEmbedded: jitEngineEmbedded,
+                           tctiEngineEmbedded: tctiEngineBinary != nil,
+                           lastStartFailed: jitLastStartFailed)
+    }
+
+    /// JIT or TCTI for this process; fixed once the engine has started.
+    private(set) static var jitDecision: JITDecision = decideJIT()
+
+    /// QEMU was started in this process (one VM per process): the decision is final.
+    private(set) static var engineStartedInProcess = false
+
+    static var jitEngineEmbedded: Bool { jitEngineBinary != nil }
+
+    /// The previous JIT start of this app failed (start marker found at launch):
+    /// this launch runs TCTI whatever debugger comes.
+    static var lastJITStartFailed: Bool { jitLastStartFailed }
+
+    /// Samples the debugger state again (e.g. after asking StikDebug to attach)
+    /// and re-decides, unless the engine has already started.
+    @discardableResult
+    static func refreshJITDecision() -> JITDecision {
+        guard !engineStartedInProcess else { return jitDecision }
+        jitProbe = sampleJIT()
+        jitDecision = decideJIT()
+        releaseDebuggerIfUnused()
+        return jitDecision
+    }
+
+    /// A StikDebug script waits for our region call, but this launch will not run
+    /// the JIT engine: tell it to detach, or the VM would run under the debugger
+    /// (stopping on every signal, killed with StikDebug's connection).
+    @discardableResult
+    private static func releaseDebuggerIfUnused() -> String? {
+        guard jitDecision.releaseDebugger, jitProbe.attached else { return nil }
+        if jit26Protocol == "none" { return "JIT: -VAJIT26 none, leaving the debugger attached" }
+        let gone = va_runtime_release_jit_debugger()
+        jitProbe = sampleJIT()
+        jitDecision = decideJIT()
+        return gone ? "JIT: told the StikDebug script to detach (no JIT engine this launch)"
+                    : "JIT: the debugger is still attached after the detach request"
+    }
+
+    /// StikDebug's URL to attach to this (running) process with universal.js, which
+    /// speaks the engine's JIT26 calls; StikDebug switches back to the app afterwards.
+    static var stikDebugJITURL: URL {
+        var c = URLComponents()
+        c.scheme = "stikjit"
+        c.host = "enable-jit"
+        c.queryItems = [URLQueryItem(name: "bundle-id", value: Bundle.main.bundleIdentifier ?? "dev.virtualandroid.app"),
+                        URLQueryItem(name: "pid", value: String(getpid())),
+                        URLQueryItem(name: "script-name", value: "universal.js")]
+        return c.url!
+    }
+
+    /// At launch: fix the JIT decision and, when no JIT engine will use the
+    /// debugger StikDebug attached, tell it to detach. Returns log lines.
+    static func prepareJITAtLaunch() -> [String] {
+        let d = jitDecision
+        let p = jitProbe
+        var lines = ["JIT: \(d.summary) [cs_debugged=\(p.csDebugged) traced=\(p.attached) " +
+                     "needs_debugger=\(p.needsDebugger) option=\(jitEnabled)]"]
+        if d.releaseDebugger, let line = releaseDebuggerIfUnused() {
+            lines.append(line)
+        }
+        return lines
     }
 
     static var gfxLibraryPath: String? {
@@ -80,6 +203,33 @@ final class QemuEngine: VMEngine {
         return frameworkBinary("va_aot")
     }
 
+    /// Guest kernel command line with `QemuArgumentBuilder.kernelPerfArguments`
+    /// (kpti=0 nokaslr mitigations=off init_on_alloc=0); `-VAKernelPerf NO`
+    /// boots without them (A/B timing).
+    static var kernelPerf: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: "VAKernelPerf") == nil || d.bool(forKey: "VAKernelPerf")
+    }
+
+    /// `-VAvCPUQoS <spec>`: QoS class of the TCG vCPU threads (VA_VCPU_QOS, read
+    /// by accel/tcg in engine/qemu-ios): one of interactive, initiated, default,
+    /// utility, background for all vCPUs, or per index ("0-1:interactive,2-3:utility").
+    /// QEMU's default is initiated, below the UIKit main thread.
+    static var vcpuQoS: String? {
+        guard let s = UserDefaults.standard.string(forKey: "VAvCPUQoS"), !s.isEmpty else { return nil }
+        return s
+    }
+
+    /// TCG code buffer in MB for this launch: `-VATBSizeMB N` (64...4096), else
+    /// for TCTI `AccelMode.tctiTBSizeMB` of the memory available now, else the
+    /// accel mode's default (nil).
+    static func tbSizeMB(accel: AccelMode, guestMB: Int) -> Int? {
+        let forced = UserDefaults.standard.integer(forKey: "VATBSizeMB")
+        if (64...4096).contains(forced) { return forced }
+        guard accel == .tcti else { return nil }
+        return AccelMode.tctiTBSizeMB(availableMB: Int(va_runtime_available_memory() >> 20), guestMB: guestMB)
+    }
+
     static var isAvailable: Bool { selectFramework() != nil }
 
     static var angleLibraryPath: String? {
@@ -95,10 +245,15 @@ final class QemuEngine: VMEngine {
     static let supportsSnapshots: Bool = {
         let d = UserDefaults.standard
         if d.object(forKey: "VASnapshotSupport") != nil { return d.bool(forKey: "VASnapshotSupport") }
-        guard let path = selectFramework()?.path,
+        guard let path = probeBinary,
               let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .alwaysMapped) else { return false }
         return data.range(of: Data("snapshot-dir\0".utf8)) != nil
     }()
+
+    /// The binary the feature probes read: any embedded engine (both are built
+    /// from the same source with the same devices), independent of the JIT
+    /// decision, which may still change before the engine starts.
+    private static var probeBinary: String? { tctiEngineBinary ?? jitEngineBinary }
 
     /// The embedded QEMU has the ranchu Wi-Fi access point / Bluetooth
     /// controller devices (probed like `supportsSnapshots`: an unknown
@@ -109,7 +264,7 @@ final class QemuEngine: VMEngine {
     static let supportsAudio = embeddedQemuContains("VirtualAndroid host platform audio")
 
     private static func embeddedQemuContains(_ marker: String) -> Bool {
-        guard let path = selectFramework()?.path,
+        guard let path = probeBinary,
               let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .alwaysMapped) else { return false }
         return data.range(of: Data(marker.utf8)) != nil
     }
@@ -133,6 +288,7 @@ final class QemuEngine: VMEngine {
             serialLog: storage.serialLog,
             hvc0Log: storage.hvc0Log,
             logcatLog: storage.logcatLog)
+        b.kernelPerf = kernelPerf
         b.gfxLib = gfx
         b.graphics = gfx != nil
         b.adbHostPort = config.adbPort
@@ -149,8 +305,8 @@ final class QemuEngine: VMEngine {
 
     /// What a snapshot taken by this app/engine/image/config would record.
     static func snapshotIdentity(config: VMLaunchConfig) -> SnapshotIdentity? {
-        guard let storage = config.storage, let (path, accel) = selectFramework() else { return nil }
-        let engine = FileHashCache.sha256(URL(fileURLWithPath: path))
+        guard let storage = config.storage, let (_, accel) = selectFramework() else { return nil }
+        let engine = engineIdentity
         let gfx = gfxLibraryPath
         let gfxHash = gfx.map { g in
             SnapshotHash.sha256(strings: [FileHashCache.sha256(URL(fileURLWithPath: g)),
@@ -166,6 +322,16 @@ final class QemuEngine: VMEngine {
         let argvHash = SnapshotHash.argvHash(argv, replacing: [(storage.root.path, "$ROOT"),
                                                                (Bundle.main.bundlePath, "$BUNDLE")])
         return SnapshotIdentity(engine: engine, gfx: gfxHash, image: image, argvHash: argvHash)
+    }
+
+    /// Snapshot engine identity: the hash of every embedded engine binary. The
+    /// JIT and TCTI engines are built from the same source with the same
+    /// devices, so a snapshot taken under one restores under the other (the
+    /// state holds no translated code); a rebuild of either invalidates it.
+    static var engineIdentity: String {
+        let bins = [jitEngineBinary, tctiEngineBinary].compactMap { $0 }
+        let hashes = bins.map { FileHashCache.sha256(URL(fileURLWithPath: $0)) }
+        return hashes.count == 1 ? hashes[0] : SnapshotHash.sha256(strings: hashes)
     }
 
     /// androidboot.* overrides for this host (bootconfig in the initrd).
@@ -186,6 +352,15 @@ final class QemuEngine: VMEngine {
 
     func start(config: VMLaunchConfig, host: HostBridge, frames: FrameSink) throws {
         guard let storage = config.storage else { throw EngineError.imageMissing("no storage") }
+        // Last look before the choice becomes final: a debugger that attached
+        // without a script (StikDebug's plain attach/detach) may be gone already,
+        // and on a TXM device the JIT engine cannot run without one.
+        let before = Self.jitDecision
+        Self.refreshJITDecision()
+        if before.useJIT && !Self.jitDecision.useJIT {
+            log(2, "JIT: the debugger left before the engine started (StikDebug ran no script?); using TCTI")
+        }
+        Self.engineStartedInProcess = true
         guard let (path, accel) = Self.selectFramework() else {
             throw EngineError.frameworkMissing(Self.unavailableReason)
         }
@@ -238,16 +413,42 @@ final class QemuEngine: VMEngine {
         var builder = Self.makeBuilder(config: config, storage: storage, accel: accel, gfx: gfx)
         builder.qmpFD = fds[1]
         builder.incomingDefer = config.restoreStateFile != nil
+        builder.tbSizeMB = Self.tbSizeMB(accel: accel, guestMB: config.memoryMB)
+        if let tb = builder.tbSizeMB {
+            log(1, "TCG code buffer \(tb) MB (\(va_runtime_available_memory() >> 20) MB available)")
+        }
         let argv = builder.build()
         log(1, "qemu " + argv.joined(separator: " "))
 
         var env: [String: String] = [:]
         if let dump = config.dumpFramesDir { env["VA_DUMP_FRAMES"] = dump }
+        // The engine's stderr (tcg JIT region preparation, AOT counters, warnings).
+        if !va_runtime_is_simulator() && !UserDefaults.standard.bool(forKey: "VAStderrConsole") {
+            env["VA_STDERR_FILE"] = storage.vmDir.appendingPathComponent("qemu.out").path
+        }
+        if case .tcgJIT = accel {
+            if let proto = Self.jit26Protocol { env["VA_JIT26"] = proto }
+            // TXM: fail the code buffer allocation cleanly when no debugger is there
+            // to prepare it, instead of crashing on the first translated block.
+            if Self.jitProbe.needsDebugger { env["VA_JIT26_REQUIRED"] = "1" }
+            if !va_runtime_is_simulator() { armJITStartMarker(serial: storage.serialLog) }
+        }
+        if let qos = Self.vcpuQoS { env["VA_VCPU_QOS"] = qos }
         if accel == .tcti {
             if let aot = Self.aotLibraryPath {
                 env["QEMU_AOT_LIB"] = aot
             } else {
                 log(1, "TCTI without the AOT cache (va_aot.framework not embedded, or -VAAOT NO)")
+            }
+        }
+        // Developer: `-VAEnv "K=V;K2=V2"` adds engine environment variables, e.g. an
+        // AOT op capture on the device (QEMU_AOT_CAPTURE/QEMU_AOT_HOT, docs/AOT.md);
+        // relative paths are relative to the VM directory (the working directory).
+        for item in (UserDefaults.standard.string(forKey: "VAEnv") ?? "").split(separator: ";") {
+            let kv = item.split(separator: "=", maxSplits: 1).map(String.init)
+            if kv.count == 2, !kv[0].isEmpty {
+                env[kv[0]] = kv[1]
+                log(1, "engine env \(kv[0])=\(kv[1])")
             }
         }
 
@@ -264,6 +465,7 @@ final class QemuEngine: VMEngine {
                 [weak self] status, fatal in
                 DispatchQueue.main.async {
                     guard let self else { return }
+                    if !fatal { self.jitStartConfirmed() }
                     self.progress?.stop()
                     self.qmp?.close()
                     self.delegate?.engine(self, didExitWithStatus: status, fatal: fatal,
@@ -285,10 +487,17 @@ final class QemuEngine: VMEngine {
 
     // MARK: M4 snapshots (docs/SNAPSHOT.md)
 
+    /// QEMU got the `migrate-incoming` request (QMP answered). An engine that exits
+    /// before that never read the snapshot (e.g. qemu_init failed allocating the
+    /// JIT code buffer), so the snapshot is still good.
+    private(set) var restoreStreamRequested = false
+
     private func restore(from state: URL, qmp: QMPClient) {
         let t0 = Date()
         qmp.run(SnapshotProtocol.restore(stateBin: state.path)) { [weak self] error in
             guard let self else { return }
+            // Only a QEMU that answered may have started reading the stream.
+            if let q = error as? QMPClient.QMPError, case .closed = q {} else { self.restoreStreamRequested = true }
             if let error {
                 self.restoreDone(.failure(error), qmp: qmp)
                 return
@@ -358,6 +567,33 @@ final class QemuEngine: VMEngine {
     }
 
     private var framesReceived: UInt64 = 0
+    private var jitMarkerTimer: DispatchSourceTimer?
+
+    /// JIT start marker (see `jitStartMarker`): set now, removed when the guest
+    /// visibly runs (a frame arrives or the kernel console grows), or when the
+    /// engine exits normally.
+    private func armJITStartMarker(serial: URL) {
+        let marker = Self.jitStartMarker
+        FileManager.default.createFile(atPath: marker.path, contents: Data("\(Date())\n".utf8))
+        func size() -> UInt64 { (try? FileManager.default.attributesOfItem(atPath: serial.path)[.size] as? UInt64) ?? 0 }
+        let start = size()
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + 2, repeating: 2)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            if self.framesReceived > 0 || size() > start { self.jitStartConfirmed() }
+        }
+        t.resume()
+        jitMarkerTimer = t
+    }
+
+    private func jitStartConfirmed() {
+        guard let t = jitMarkerTimer else { return }
+        t.cancel()
+        jitMarkerTimer = nil
+        try? FileManager.default.removeItem(at: Self.jitStartMarker)
+        log(1, "JIT engine is running guest code")
+    }
 
     /// Renderer thread, no BQL. The IOSurface is only guaranteed during the
     /// call; storing it in DisplayFrame retains it (ARC = CFRetain) until the
@@ -429,7 +665,8 @@ final class BootProgressTracker {
         ("starting service 'zygote", 0.35, "Starting zygote"),
         ("starting service 'bootanim'", 0.45, "Boot animation"),
         ("Entered the Android system server", 0.50, "Starting system server"),
-        ("SystemServerTiming: StartActivityManagerReadyPhase", 0.70, "Starting services"),
+        // logcat runs at *:I (BootConfig): only Info-and-up lines appear there.
+        ("SystemServiceManager: Starting phase 500", 0.70, "Starting services"),
         ("System now ready", 0.80, "System ready"),
         ("Boot is finished", 0.95, "Launching home screen"),
     ]
