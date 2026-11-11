@@ -7,7 +7,7 @@
 #   engine/scripts/ios/run_sim.sh [-b tcg|tcti] [--timeout SECS] [--fresh] [--name RUN]
 #                                 [--device UDID] [--machine virt|ranchu] [--until MILESTONE]
 #                                 [--adb-port PORT] [--gfx-lib PATH|none] [--screenshot-dir DIR]
-#                                 [--keep] [-- extra qemu args]
+#                                 [--keep] [--userdata-from DIR] [-- extra qemu args]
 #
 # --until stops QEMU (monitor "quit") once a milestone is seen, e.g.
 #   --until zygote   (default: run until sys.boot_completed=1 or the timeout)
@@ -18,7 +18,21 @@
 # stack, so `adb connect 127.0.0.1:PORT` works from macOS), pipe-port 5000, the
 # host adb key in bootconfig, and libva_gfx from gfx/build-ios-sim/dist
 # (va_gfx.framework + GLESv2/MoltenVK next to it). --screenshot-dir sets
-# VA_DUMP_FRAMES (frame-N.png / latest.png).
+# VA_DUMP_FRAMES (frame-N.png / latest.png). QMP is on $RUN/qmp.sock (tools/aot/workload.py
+# --qmp injects touches there). VA_TB_SIZE=MB sets the TCG code buffer (default 1024).
+#
+# --userdata-from DIR: userdata/encryptionkey/cache are APFS clones of a prebaked image
+# pack's qcow2s (tools/prebake_userdata.sh, e.g. app/build/ImagePackPrebaked) instead of empty
+# disks, on --fresh or when the run has none (or ones from another pack); a run with qcow2
+# disks drives them as qcow2 and boots with the prebaked initrd profile (make_initrd.py
+# --prebaked), VA_PREBAKED=0 without it (see tools/run-macos.sh).
+#
+# Kernel command line: VA_KERNEL_PERF=0 drops "kpti=0 nokaslr mitigations=off init_on_alloc=0"
+# (A/B; see tools/run-macos.sh).
+#
+# Serial 0 is an engine-owned ringbuf, as in the app (logged to serial.log): the engine types
+# its guest setup there once the guest has booted (hw/android/guest_time.c: captive portal
+# check off; with -device va-bluetooth, Bluetooth on once the guest is quiet).
 #
 # Run state: engine/build-ios/run/<name>/ (serial.log, logcat.log, qemu.out,
 # milestones.txt with host wall-clock seconds since spawn).
@@ -29,7 +43,7 @@ OUT=$ROOT/engine/build-ios
 IMG=$ROOT/images/android-33/arm64-v8a
 E2=$(brew --prefix e2fsprogs)/sbin
 BACKEND=tcg TIMEOUT=900 FRESH=0 NAME= UDID= MACHINE=ranchu ADB_PORT=5590 UNTIL=sys.boot_completed=1
-GFX_LIB=auto SHOT_DIR= KEEP=0
+GFX_LIB=auto SHOT_DIR= KEEP=0 USERDATA_FROM=
 while (( $# )); do
   case $1 in
     -b) BACKEND=$2; shift ;;
@@ -43,6 +57,7 @@ while (( $# )); do
     --gfx-lib) GFX_LIB=$2; shift ;;
     --screenshot-dir) SHOT_DIR=${2:A}; shift ;;
     --keep) KEEP=1 ;;
+    --userdata-from) USERDATA_FROM=${2:A}; shift ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -71,22 +86,40 @@ fi
 
 RUN=$OUT/run/$NAME
 mkdir -p $RUN
-if (( FRESH )) || [[ ! -f $RUN/userdata.img ]]; then
-  rm -f $RUN/userdata.img $RUN/encryptionkey.img $RUN/cache.img
-  cp $IMG/encryptionkey.img $RUN/
-  mkfile -n 6g $RUN/userdata.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L data $RUN/userdata.img
-  mkfile -n 64m $RUN/cache.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L cache $RUN/cache.img
+DISKS=(userdata encryptionkey cache)
+if [[ -n $USERDATA_FROM ]]; then
+  for d in $DISKS; do
+    [[ -f $USERDATA_FROM/$d.qcow2 ]] || { echo "missing $USERDATA_FROM/$d.qcow2" >&2; exit 2; }
+  done
 fi
+if (( FRESH )) || [[ ! -f $RUN/userdata.img && ! -f $RUN/userdata.qcow2 ]] ||
+   [[ -n $USERDATA_FROM && "$(cat $RUN/userdata.from 2>/dev/null)" != "$USERDATA_FROM" ]]; then
+  rm -f $RUN/{userdata,encryptionkey,cache}.{img,qcow2} $RUN/userdata.from
+  if [[ -n $USERDATA_FROM ]]; then
+    for d in $DISKS; do
+      cp -c $USERDATA_FROM/$d.qcow2 $RUN/ 2>/dev/null || cp $USERDATA_FROM/$d.qcow2 $RUN/
+    done
+    print -r -- $USERDATA_FROM > $RUN/userdata.from
+  else
+    cp $IMG/encryptionkey.img $RUN/
+    mkfile -n 6g $RUN/userdata.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L data $RUN/userdata.img
+    mkfile -n 64m $RUN/cache.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L cache $RUN/cache.img
+  fi
+fi
+DISK=img DISK_FMT=raw
+[[ -f $RUN/userdata.qcow2 ]] && DISK=qcow2 DISK_FMT=qcow2
+[[ -f $RUN/userdata.from ]] && : ${VA_PREBAKED:=1}
 # Bootconfig overrides (as tools/run-macos.sh): the host adb key lets adbd accept
 # this machine without a prompt.
 INITRD_ARGS=()
+[[ ${VA_PREBAKED:-0} == 1 ]] && INITRD_ARGS+=(--prebaked)
 [[ -f ~/.android/adbkey.pub ]] && INITRD_ARGS+=("androidboot.qemu.adb.pubkey=$(tr -d '\n' < ~/.android/adbkey.pub)")
 INITRD_STAMP="$(shasum $ROOT/tools/make_initrd.py $IMG/ramdisk.img | awk '{print $1}' | tr -d '\n') ${(j: :)INITRD_ARGS}"
 if [[ ! -f $RUN/initrd || "$(cat $RUN/initrd.params 2>/dev/null)" != "$INITRD_STAMP" ]]; then
   python3 -I $ROOT/tools/make_initrd.py $IMG/ramdisk.img $RUN/initrd $INITRD_ARGS
   print -r -- "$INITRD_STAMP" > $RUN/initrd.params
 fi
-rm -f $RUN/serial.log $RUN/logcat.log $RUN/hvc0.log $RUN/monitor.sock $RUN/milestones.txt
+rm -f $RUN/serial.log $RUN/logcat.log $RUN/hvc0.log $RUN/monitor.sock $RUN/qmp.sock $RUN/milestones.txt
 
 NET_FWD=",hostfwd=tcp:127.0.0.1:$ADB_PORT-:5555" EXTRA_DEV=() TRACE_OPT=() SPAWN_ENV=()
 if [[ $MACHINE == ranchu* ]]; then
@@ -106,15 +139,18 @@ if [[ -n $SHOT_DIR ]]; then
   export SIMCTL_CHILD_VA_DUMP_FRAMES=$SHOT_DIR
 fi
 
+KERNEL_CMDLINE="8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig"
+[[ ${VA_KERNEL_PERF:-1} == 0 ]] || KERNEL_CMDLINE+=" kpti=0 nokaslr mitigations=off init_on_alloc=0"
 ARGS=(
-  -M $MACHINE -accel tcg,thread=multi,tb-size=1024 -cpu cortex-a76 -smp 4 -m 2048 -nodefaults -display none
-  -serial file:$RUN/serial.log -monitor unix:$RUN/monitor.sock,server,nowait
+  -M $MACHINE -accel tcg,thread=multi,tb-size=${VA_TB_SIZE:-1024} -cpu cortex-a76 -smp 4 -m 2048 -nodefaults -display none
+  -chardev ringbuf,id=vaconsole,size=65536,logfile=$RUN/serial.log -serial chardev:vaconsole
+  -monitor unix:$RUN/monitor.sock,server,nowait -qmp unix:$RUN/qmp.sock,server=on,wait=off
   -kernel $IMG/kernel-ranchu -initrd $RUN/initrd
-  -append "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig"
+  -append "$KERNEL_CMDLINE"
   -drive index=0,id=vendor,if=none,file=$IMG/vendor.img,read-only=on,format=raw -device virtio-blk-device,drive=vendor
-  -drive index=1,id=encrypt,if=none,file=$RUN/encryptionkey.img,format=raw -device virtio-blk-device,drive=encrypt
-  -drive index=2,id=userdata,if=none,file=$RUN/userdata.img,format=raw -device virtio-blk-device,drive=userdata
-  -drive index=3,id=cache,if=none,file=$RUN/cache.img,format=raw -device virtio-blk-device,drive=cache
+  -drive index=1,id=encrypt,if=none,file=$RUN/encryptionkey.$DISK,format=$DISK_FMT -device virtio-blk-device,drive=encrypt
+  -drive index=2,id=userdata,if=none,file=$RUN/userdata.$DISK,format=$DISK_FMT -device virtio-blk-device,drive=userdata
+  -drive index=3,id=cache,if=none,file=$RUN/cache.$DISK,format=$DISK_FMT -device virtio-blk-device,drive=cache
   -drive index=4,id=system,if=none,file=$IMG/system.img,read-only=on,format=raw -device virtio-blk-device,drive=system
   -netdev user,id=mynet$NET_FWD -device virtio-net-device,netdev=mynet
   -device virtio-rng-device

@@ -18,7 +18,8 @@ enum BootConfig {
         "androidboot.opengles.version": "196608",
         "androidboot.debug.hwui.renderer": "skiagl",
         "androidboot.dalvik.vm.heapsize": "512m",
-        "androidboot.logcat": "*:V",
+        // Info and up (Choreographer "Skipped N frames", OpenGLRenderer "Davey!").
+        "androidboot.logcat": "*:I",
         "androidboot.qemu.skin": "1080x2340",
         "androidboot.qemu.vsync": "60",
         "androidboot.qemu.settings.system.screen_off_timeout": "2147483647",
@@ -40,9 +41,32 @@ enum BootConfig {
     /// Loaded last by init from the debug fragment (the only host-side way to
     /// set ro.*). Emulation is several times slower than a phone, so the
     /// watchdog and ActivityManager timeouts are scaled.
+    /// Bluetooth (see make_initrd.py): 5 x 4 s for the adapter's BLE steps;
+    /// the peer-only OBEX/tethering profiles (OPP, PBAP, MAP, PAN) off, so
+    /// the fixed 4 s BR/EDR step fits under TCTI; no auto-enable at boot (the
+    /// engine turns Bluetooth on once the booted guest is quiet).
     static let debugProps: [String: String] = [
         "ro.hw_timeout_multiplier": "5",
+        "ro.bluetooth.ble_start_timeout_delay": "20000",
+        "ro.bluetooth.ble_stop_timeout_delay": "20000",
+        "bluetooth.profile.opp.enabled": "false",
+        "bluetooth.profile.pbap.server.enabled": "false",
+        "bluetooth.profile.map.server.enabled": "false",
+        "bluetooth.profile.pan.nap.enabled": "false",
+        "bluetooth.profile.pan.panu.enabled": "false",
+        "bluetooth.framework.support_persisted_state": "false",
     ]
+
+    /// Opt-in "prebaked" profile (make_initrd.py --prebaked): userdata where
+    /// first boot, odrefresh and `pm compile -m speed -f -a` ran on the Mac.
+    /// Currently nothing extra: turning the JIT off and compiling installs with
+    /// "speed" made apps installed later interpret their code and take most of
+    /// an hour to install (see make_initrd.py).
+    static let prebakedDebugProps: [String: String] = [:]
+
+    static func debugProperties(prebaked: Bool) -> [String: String] {
+        prebaked ? debugProps.merging(prebakedDebugProps) { _, new in new } : debugProps
+    }
 
     /// newc cpio archive of regular files plus the trailer (as make_initrd.py).
     static func cpioNewc(_ files: [(String, Data)]) -> Data {
@@ -114,10 +138,12 @@ enum BootConfig {
         defaults.merging(overrides) { _, new in new }
     }
 
-    /// Writes ramdisk + trailer to `output` (atomically).
-    static func buildInitrd(ramdisk: URL, output: URL, overrides: [String: String] = [:]) throws {
+    /// Writes ramdisk + trailer to `output` (atomically). `prebaked` adds
+    /// `prebakedDebugProps` (as make_initrd.py --prebaked).
+    static func buildInitrd(ramdisk: URL, output: URL, overrides: [String: String] = [:],
+                            prebaked: Bool = false) throws {
         var data = try Data(contentsOf: ramdisk, options: .mappedIfSafe)
-        data.append(debugFragment())
+        data.append(debugFragment(debugProperties(prebaked: prebaked)))
         data.append(trailer(parameters: parameters(overrides: overrides), ramdiskLength: data.count))
         try data.write(to: output, options: .atomic)
     }

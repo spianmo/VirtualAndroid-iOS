@@ -3,8 +3,8 @@
 #
 #   tools/run-macos.sh [--fresh] [--tcg] [--machine virt|ranchu] [--display] [--timeout SECS]
 #                      [--name RUN] [--adb-port PORT] [--trace PATTERN]... [--console]
-#                      [--gfx-lib PATH|none] [--screenshot-dir DIR] [--snapshot]
-#                      [-- extra qemu args]
+#                      [--gfx-lib PATH|none] [--screenshot-dir DIR] [--snapshot] [--smp N]
+#                      [--userdata-from DIR] [-- extra qemu args]
 #
 # --machine ranchu (the Android emulator board: virt + goldfish pipe/sync/battery/events,
 # virtio multitouch + "qwerty2" keyboard) also enables the android_pipe_connect trace, so
@@ -20,6 +20,8 @@
 # va-wifi-pci, the access point "AndroidWifi" the guest's wlan0 joins (own slirp net),
 # va-bluetooth, the Bluetooth controller on the virtio-serial port "bluetooth", and
 # virtio-sound-pci on the "va" audio backend (the platform's speaker and microphone).
+# Android does not turn Bluetooth on at boot (make_initrd.py); the engine does, over the
+# engine-owned console once the booted guest is quiet, so with --console it stays off.
 # boot check: adb -s 127.0.0.1:PORT shell getprop sys.boot_completed
 # VA_HOST_PLATFORM=<libva_host_macos.dylib> (host/macos/build.sh) loads the test platform.
 # QMP is always on $RUN/qmp.sock.
@@ -29,6 +31,21 @@
 # tools/snapshot.py restore loads it (log: $RUN/restore.log); otherwise the snapshot is
 # discarded and the guest cold-boots. Save with: tools/snapshot.py suspend --run $RUN [--quit]
 #   QEMU=/path/to/qemu-system-aarch64 overrides the binary (each agent uses its own build dir).
+# The kernel command line ends in "kpti=0 nokaslr mitigations=off init_on_alloc=0" (KASLR
+# forces KPTI on, and with KPTI every kernel entry/exit writes TTBR1 with another ASID, which
+# QEMU's softmmu answers with a full TLB flush); VA_KERNEL_PERF=0 drops those four words (A/B).
+# --smp N sets the vCPU count (default 4). VA_PREBAKED=1 builds the initrd with
+# make_initrd.py --prebaked (for a userdata compiled ahead of time).
+# --userdata-from DIR: a prebaked image pack (tools/prebake_userdata.sh, e.g.
+# app/build/ImagePackPrebaked): on --fresh, or when the run has no disks (or disks from
+# another pack), userdata/encryptionkey/cache become APFS clones of DIR's qcow2s instead of
+# empty disks (they belong together: the metadata encryption key lives in encryptionkey).
+# A run with qcow2 disks drives them as qcow2 and gets the prebaked initrd profile
+# ($RUN/userdata.from records the pack); VA_PREBAKED=0 boots it with the default one, but
+# then odrefresh sees other dalvik.vm.* properties and recompiles the boot classpath.
+# logcat.log gets Info and up (androidboot.logcat=*:I); VA_LOGCAT='*:V' brings back everything.
+# TCG on macOS: VA_VCPU_QOS sets the vCPU thread QoS (engine/qemu-ios builds only, e.g.
+# VA_VCPU_QOS=utility or "0-1:interactive,2-3:utility"; default initiated).
 #
 # Per-run state lives in engine/run/<name> (default "dev"): writable disks,
 # serial.log (kernel console), logcat.log (androidboot.logcat on hvc1).
@@ -39,7 +56,7 @@ QEMU=${QEMU:-$ROOT/engine/build-macos/qemu-system-aarch64}
 QEMU_IMG=${QEMU_IMG:-$ROOT/engine/build-macos/qemu-img}
 E2=$(brew --prefix e2fsprogs)/sbin
 NAME=dev FRESH=0 ACCEL=hvf MACHINE=virt DISPLAY_OPT=(-display none) TIMEOUT=0 ADB_PORT=5555
-TRACES=() CONSOLE=0 GFX_LIB=auto SHOT_DIR= SNAPSHOT=0
+TRACES=() CONSOLE=0 GFX_LIB=auto SHOT_DIR= SNAPSHOT=0 SMP=4 USERDATA_FROM=
 while (( $# )); do
   case $1 in
     --fresh) FRESH=1 ;;
@@ -54,6 +71,8 @@ while (( $# )); do
     --gfx-lib) GFX_LIB=$2; shift ;;
     --screenshot-dir) SHOT_DIR=${2:A}; shift ;;
     --snapshot) SNAPSHOT=1 ;;
+    --smp) SMP=$2; shift ;;
+    --userdata-from) USERDATA_FROM=${2:A}; shift ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -63,16 +82,38 @@ RUN=$ROOT/engine/run/$NAME
 SNAP=$RUN/snapshot
 mkdir -p $RUN
 SNAPPY=(python3 -I $ROOT/tools/snapshot.py)
-if (( FRESH )) || [[ ! -f $RUN/userdata.img ]]; then
+DISKS=(userdata encryptionkey cache)
+if [[ -n $USERDATA_FROM ]]; then
+  for d in $DISKS; do
+    [[ -f $USERDATA_FROM/$d.qcow2 ]] || { echo "missing $USERDATA_FROM/$d.qcow2" >&2; exit 2; }
+  done
+fi
+if (( FRESH )) || [[ ! -f $RUN/userdata.img && ! -f $RUN/userdata.qcow2 ]] ||
+   [[ -n $USERDATA_FROM && "$(cat $RUN/userdata.from 2>/dev/null)" != "$USERDATA_FROM" ]]; then
   # New disks invalidate any snapshot.
   [[ -d $SNAP ]] && $SNAPPY discard --run $RUN
-  rm -f $RUN/userdata.img $RUN/encryptionkey.img $RUN/cache.img
-  cp $IMG/encryptionkey.img $RUN/
-  mkfile -n 6g $RUN/userdata.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L data $RUN/userdata.img
-  mkfile -n 64m $RUN/cache.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L cache $RUN/cache.img
+  rm -f $RUN/{userdata,encryptionkey,cache}.{img,qcow2} $RUN/userdata.from
+  if [[ -n $USERDATA_FROM ]]; then
+    for d in $DISKS; do
+      cp -c $USERDATA_FROM/$d.qcow2 $RUN/ 2>/dev/null || cp $USERDATA_FROM/$d.qcow2 $RUN/
+    done
+    print -r -- $USERDATA_FROM > $RUN/userdata.from
+    echo "disks: clones of $USERDATA_FROM/{${(j:,:)DISKS}}.qcow2"
+  else
+    cp $IMG/encryptionkey.img $RUN/
+    mkfile -n 6g $RUN/userdata.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L data $RUN/userdata.img
+    mkfile -n 64m $RUN/cache.img && $E2/mke2fs -q -F -t ext4 -b 4096 -L cache $RUN/cache.img
+  fi
 fi
+DISK=img DISK_FMT=raw
+[[ -f $RUN/userdata.qcow2 ]] && DISK=qcow2 DISK_FMT=qcow2
+# Prebaked disks get the prebaked profile: odrefresh's cache-info.xml records every
+# dalvik.vm.* property, so the guest must boot with the ones it was prebaked with.
+[[ -f $RUN/userdata.from ]] && : ${VA_PREBAKED:=1}
 # Bootconfig overrides. The host adb key lets adbd accept this machine without a prompt.
 INITRD_ARGS=()
+[[ ${VA_PREBAKED:-0} == 1 ]] && INITRD_ARGS+=(--prebaked)
+[[ -n ${VA_LOGCAT:-} ]] && INITRD_ARGS+=("androidboot.logcat=$VA_LOGCAT")
 [[ -f ~/.android/adbkey.pub ]] && INITRD_ARGS+=("androidboot.qemu.adb.pubkey=$(tr -d '\n' < ~/.android/adbkey.pub)")
 # Rebuild when the bootconfig defaults or overrides change.
 INITRD_STAMP="$(shasum $ROOT/tools/make_initrd.py $IMG/ramdisk.img | awk '{print $1}' | tr -d '\n') ${(j: :)INITRD_ARGS}"
@@ -124,17 +165,19 @@ TRACE_OPT=()
 for t in $TRACES; do TRACE_OPT+=(-trace "enable=$t"); done
 
 if [[ $ACCEL == hvf ]]; then CPU=(-accel hvf -cpu host); else CPU=(-accel tcg,thread=multi,tb-size=1024 -cpu cortex-a76); fi
+KERNEL_CMDLINE="8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig mac80211_hwsim.radios=0"
+[[ ${VA_KERNEL_PERF:-1} == 0 ]] || KERNEL_CMDLINE+=" kpti=0 nokaslr mitigations=off init_on_alloc=0"
 
 ARGS=(
-  -M $MACHINE $CPU -smp 4 $MEM_OPT -nodefaults $DISPLAY_OPT
+  -M $MACHINE $CPU -smp $SMP $MEM_OPT -nodefaults $DISPLAY_OPT
   $SERIAL_OPT -monitor unix:$RUN/monitor.sock,server,nowait -qmp unix:$RUN/qmp.sock,server=on,wait=off
   -kernel $IMG/kernel-ranchu -initrd $RUN/initrd
-  -append "8250.nr_uarts=1 no_timer_check console=ttyAMA0,38400 keep_bootcon earlyprintk=ttyAMA0 ndns=2 loop.max_part=7 loop.max_loop=64 printk.devkmsg=on bootconfig mac80211_hwsim.radios=0"
+  -append "$KERNEL_CMDLINE"
   # Order matters: it fixes the virtio-mmio addresses the image's fstab expects.
   -drive index=0,id=vendor,if=none,file=$IMG/vendor.img,read-only=on,format=raw -device virtio-blk-device,drive=vendor
-  -drive index=1,id=encrypt,if=none,file=$RUN/encryptionkey.img,format=raw -device virtio-blk-device,drive=encrypt
-  -drive index=2,id=userdata,if=none,file=$RUN/userdata.img,format=raw -device virtio-blk-device,drive=userdata
-  -drive index=3,id=cache,if=none,file=$RUN/cache.img,format=raw -device virtio-blk-device,drive=cache
+  -drive index=1,id=encrypt,if=none,file=$RUN/encryptionkey.$DISK,format=$DISK_FMT -device virtio-blk-device,drive=encrypt
+  -drive index=2,id=userdata,if=none,file=$RUN/userdata.$DISK,format=$DISK_FMT -device virtio-blk-device,drive=userdata
+  -drive index=3,id=cache,if=none,file=$RUN/cache.$DISK,format=$DISK_FMT -device virtio-blk-device,drive=cache
   -drive index=4,id=system,if=none,file=$IMG/system.img,read-only=on,format=raw -device virtio-blk-device,drive=system
   -netdev user,id=mynet$NET_FWD -device virtio-net-device,netdev=mynet
   -device virtio-rng-device

@@ -9,6 +9,7 @@ import Foundation
 ///         encryptionkey.img|.qcow2 userdata.qcow2 cache.qcow2 manifest.json
 ///       vms/default/                      the VM's writable state
 ///         encryptionkey.(img|qcow2) userdata.qcow2 cache.qcow2 initrd
+///         userdata-origin                 manifest "userdata" of the pack the disks came from
 ///         serial.log hvc0.log logcat.log
 ///         snapshot/                       M4 (docs/SNAPSHOT.md): ram.img (guest RAM,
 ///                                         file-backed, shared) state.bin gfx/
@@ -16,9 +17,16 @@ import Foundation
 ///
 /// The "image pack" is a folder with the image files (see app/README.md);
 /// userdata/cache must be freshly formatted ext4 qcow2s made on macOS by
-/// app/scripts/make_userdata_qcow2.sh, because iOS has no mke2fs.
+/// app/scripts/make_userdata_qcow2.sh, because iOS has no mke2fs. A prebaked
+/// pack (tools/prebake_userdata.sh, manifest "userdata": "prebaked-speed")
+/// carries a userdata whose first boot, odrefresh and `pm compile -m speed`
+/// already ran on the Mac, with its encryptionkey (metadata encryption key)
+/// and cache: the three are cloned together, and such a VM boots with the
+/// prebaked initrd profile (BootConfig.prebakedDebugProps).
 struct VMStorage {
     static let imagePackFolderName = "ImagePack"
+    /// Manifest "userdata" values starting with this mark a prebaked pack.
+    static let prebakedUserdataPrefix = "prebaked"
 
     let root: URL
 
@@ -44,6 +52,9 @@ struct VMStorage {
     var serialLog: URL { vmDir.appendingPathComponent("serial.log") }
     var hvc0Log: URL { vmDir.appendingPathComponent("hvc0.log") }
     var logcatLog: URL { vmDir.appendingPathComponent("logcat.log") }
+    /// What the VM's disks were cloned from (the pack's manifest "userdata",
+    /// "empty" for formatted-only disks); written when they are created.
+    var userdataOrigin: URL { vmDir.appendingPathComponent("userdata-origin") }
 
     // Snapshot (M4).
     var snapshotDir: URL { vmDir.appendingPathComponent("snapshot", isDirectory: true) }
@@ -108,6 +119,34 @@ struct VMStorage {
 
     var isVMCreated: Bool { exists(userdata) && exists(cache) && exists(encryption) }
 
+    // MARK: Prebaked userdata
+
+    /// The pack manifest's "userdata" (nil: empty disks, or no manifest).
+    static func userdataKind(manifest: URL) -> String? {
+        guard let data = try? Data(contentsOf: manifest),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return json["userdata"] as? String
+    }
+
+    static func isPrebaked(_ kind: String?) -> Bool {
+        kind?.hasPrefix(prebakedUserdataPrefix) ?? false
+    }
+
+    /// The installed image's userdata template kind.
+    var imageUserdataKind: String? { Self.userdataKind(manifest: manifest) }
+    var isPrebakedImage: Bool { Self.isPrebaked(imageUserdataKind) }
+
+    /// Kind of the VM's current disks (nil: none yet, or made by an app
+    /// version that did not record it, i.e. from an empty template).
+    var vmUserdataKind: String? {
+        (try? String(contentsOf: userdataOrigin, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    /// The VM's disks came from a prebaked pack: boot with the prebaked profile.
+    /// odrefresh records every dalvik.vm.* property in cache-info.xml and
+    /// recompiles the boot classpath when one changes (dalvik.vm.usejit too).
+    var isPrebakedVM: Bool { Self.isPrebaked(vmUserdataKind) }
+
     // MARK: Image pack discovery
 
     /// Candidate pack locations: Documents/ImagePack (side-loaded with simctl
@@ -139,6 +178,13 @@ struct VMStorage {
         let names = Self.requiredPackFiles.compactMap { names in
             names.first { fm.fileExists(atPath: pack.appendingPathComponent($0).path) }
         } + Self.optionalPackFiles.filter { fm.fileExists(atPath: pack.appendingPathComponent($0).path) }
+        // Drop what an earlier pack left and this one does not have (a stale
+        // manifest.json would claim a prebaked userdata, a stale
+        // encryptionkey.qcow2 would win over this pack's .img).
+        for name in Self.requiredPackFiles.flatMap({ $0 }) + Self.optionalPackFiles where !names.contains(name) {
+            let url = imageDir.appendingPathComponent(name)
+            if exists(url) { try fm.removeItem(at: url) }
+        }
         let sizes = names.map { fileSize(pack.appendingPathComponent($0)) }
         let total = max(1, sizes.reduce(0, +))
         var done: Int64 = 0
@@ -152,8 +198,13 @@ struct VMStorage {
     }
 
     /// Creates the VM's writable disks from the pristine templates (first run
-    /// or after a reset) and (re)builds the initrd.
-    func prepareVM(bootOverrides: [String: String]) throws {
+    /// or after a reset) and (re)builds the initrd. A new VM gets userdata,
+    /// encryptionkey and cache from the same pack (userdata is encrypted with
+    /// the metadata key in encryptionkey) and records their kind in
+    /// `userdataOrigin`. The initrd uses the prebaked profile when the VM's
+    /// disks are prebaked; `prebaked` overrides that (A/B). Returns the profile used.
+    @discardableResult
+    func prepareVM(bootOverrides: [String: String], prebaked: Bool? = nil) throws -> Bool {
         try makeDirectories()
         guard let encTemplate = encryptionTemplate,
               let udTemplate = installedTemplate(["userdata.qcow2"]),
@@ -161,13 +212,26 @@ struct VMStorage {
             throw EngineError.imageMissing(missingImageFiles().joined(separator: ", "))
         }
         let encTarget = vmDir.appendingPathComponent(encTemplate.lastPathComponent)
-        if !exists(encTarget) { try cloneOrCopy(encTemplate, to: encTarget) }
-        if !exists(userdata) { try cloneOrCopy(udTemplate, to: userdata) }
-        if !exists(cache) { try cloneOrCopy(cacheTemplate, to: cache) }
-        try BootConfig.buildInitrd(ramdisk: ramdisk, output: initrd, overrides: bootOverrides)
+        let encExisting = ["encryptionkey.qcow2", "encryptionkey.img"].map { vmDir.appendingPathComponent($0) }
+        if !exists(userdata) {
+            for stale in encExisting + [cache, userdataOrigin] where exists(stale) {
+                try fm.removeItem(at: stale)
+            }
+            try cloneOrCopy(encTemplate, to: encTarget)
+            try cloneOrCopy(udTemplate, to: userdata)
+            try cloneOrCopy(cacheTemplate, to: cache)
+            try (imageUserdataKind ?? "empty").write(to: userdataOrigin, atomically: true, encoding: .utf8)
+        } else {
+            // Keep the existing userdata; only fill in what is missing.
+            if !encExisting.contains(where: exists) { try cloneOrCopy(encTemplate, to: encTarget) }
+            if !exists(cache) { try cloneOrCopy(cacheTemplate, to: cache) }
+        }
+        let profile = prebaked ?? isPrebakedVM
+        try BootConfig.buildInitrd(ramdisk: ramdisk, output: initrd, overrides: bootOverrides, prebaked: profile)
         for log in [serialLog, hvc0Log, logcatLog] {
             try? fm.removeItem(at: log)
         }
+        return profile
     }
 
     /// Factory reset: drops userdata/cache/metadata and snapshots.

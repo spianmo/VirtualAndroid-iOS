@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Compiles the platform-independent app sources with swiftc on macOS and runs
 # app/Tests/PureLogicTests.swift: bootconfig byte-identical to
-# tools/make_initrd.py, display rotation/touch mapping, QEMU argv, keymap,
+# tools/make_initrd.py (default and --prebaked), display rotation/touch mapping, QEMU argv, keymap,
 # snapshot manifest/validity/launch plan/lifecycle state machine/QMP sequence.
 set -euo pipefail
 ROOT=${0:A:h:h:h}
@@ -17,4 +17,5 @@ cp $ROOT/app/Tests/PureLogicTests.swift $TMP/main.swift   # top-level code must 
 swiftc -O -o $TMP/pure $TMP/main.swift $TMP/Shims.swift \
   $APP/VM/BootConfig.swift $APP/VM/QemuArguments.swift $APP/VM/Snapshot.swift $APP/Display/DisplayGeometry.swift $APP/Input/LinuxKeymap.swift
 python3 -I $ROOT/tools/make_initrd.py $IMG/ramdisk.img $TMP/initrd.py androidboot.qemu.skin=1080x2340
-$TMP/pure $IMG/ramdisk.img $TMP/initrd.py
+python3 -I $ROOT/tools/make_initrd.py $IMG/ramdisk.img $TMP/initrd-prebaked.py --prebaked androidboot.qemu.skin=1080x2340
+$TMP/pure $IMG/ramdisk.img $TMP/initrd.py $TMP/initrd-prebaked.py
