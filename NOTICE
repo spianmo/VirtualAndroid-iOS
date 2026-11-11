@@ -1,0 +1,43 @@
+VirtualAndroid
+Copyright 2026 The VirtualAndroid Authors
+
+This repository is licensed under the Apache License, Version 2.0 (see
+LICENSE), with the exceptions below.
+
+Files in this repository with their own license
+-----------------------------------------------
+
+Files that state a license in their header keep it. These are
+GPL-2.0-or-later, like the QEMU code they belong to or are built with:
+
+  gfx/integration/ranchu_gfx.c, gfx/integration/ranchu_gfx.h
+  host/macos/include/va_host_plugin.h
+  host/macos/guest/va_pipe_probe.c, host/macos/guest/VaHwProbe.java
+  tools/aot/tests/atomic128/a128.c
+
+third_party/ref-emu/ holds reference sources from the Android Emulator and
+AOSP, each under the license stated in the file (Apache-2.0 or GPL-2.0;
+the few files without a header come from AOSP, Apache-2.0).
+
+Some sources are compiled against the engine's GPL-2.0-or-later headers:
+gfx/libva_gfx (include/hw/android/android_pipe.h), tools/aot/tbprof.c (a
+QEMU TCG plugin, qemu-plugin.h) and tools/aot/tests/pt-unit/fs_setup.c.
+
+Not in this repository
+----------------------
+
+The engine, a fork of QEMU and of UTM's QEMU tree, is GPL-2.0 (QEMU's
+license, see its COPYING and LICENSE):
+https://github.com/spianmo/VirtualAndroid-qemu
+An app build embeds it as a separate framework; whoever distributes such a
+build has to follow the GPL for the engine, including offering its source.
+
+Build-time dependencies are downloaded by the build scripts and keep their
+own licenses: UTM's build recipe and patches (Apache-2.0), glib, gettext
+(libintl) and libiconv (LGPL), libffi, pixman and zstd (MIT/BSD), libslirp
+(BSD), libucontext (ISC), gfxstream and aemu (Apache-2.0), ANGLE (BSD),
+MoltenVK (Apache-2.0).
+
+The Android system image is not included. It comes from the Android SDK
+under Google's terms. Android is a trademark of Google LLC; this project is
+not affiliated with Google or Apple.

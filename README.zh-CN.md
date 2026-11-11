@@ -92,7 +92,8 @@ Mac 上的 lldb 替身，它准备 512 MB 代码缓冲约需 3.5 分钟（每页
 | `docs/` | 设计说明和测试数据 |
 
 QEMU 分支（`ranchu` 主板、goldfish 设备、pipe 服务、AOT 运行时、iOS JIT 支持）
-放在单独的仓库里，检出到 `engine/qemu`。
+放在单独的仓库 [VirtualAndroid-qemu](https://github.com/spianmo/VirtualAndroid-qemu) 里，
+检出到 `engine/qemu`。
 
 ## 编译
 
@@ -106,8 +107,8 @@ Apple 开发者账号**。
 brew install meson ninja pkg-config bison glib e2fsprogs xcodegen
 
 # 源码（引擎和部分构建输入是单独检出的）
-git clone <本仓库> VirtualAndroid && cd VirtualAndroid
-git clone <引擎仓库> engine/qemu               # 即上面说的 QEMU 分支
+git clone https://github.com/spianmo/VirtualAndroid-iOS.git VirtualAndroid && cd VirtualAndroid
+git clone https://github.com/spianmo/VirtualAndroid-qemu.git engine/qemu   # QEMU 分支
 engine/scripts/ios/fetch_deps.sh              # UTM 构建配方 + 依赖源码包
 gfx/scripts/fetch-sources.sh                  # gfxstream、aemu、ANGLE（固定版本）
 
@@ -183,10 +184,12 @@ AOT 缓存是可选的，需要用你编出的那个引擎版本跑采样再生�
 
 ## 许可证
 
-见 [LICENSE](LICENSE)。第三方代码保留各自的许可证：QEMU 及引擎分支为 GPL-2.0；
-`third_party/ref-emu` 里的 Android 模拟器参考源码按各文件标注为 Apache-2.0 或 GPL-2.0
-（少数没有标注的来自 AOSP，为 Apache-2.0）；
-gfxstream、aemu、ANGLE、MoltenVK 在构建时下载，适用各自的许可证。
+采用 Apache License 2.0，见 [LICENSE](LICENSE)。例外情况列在 [NOTICE](NOTICE) 里：
+本仓库有少数文件按文件头声明为 GPL-2.0-or-later，`third_party/ref-emu` 里的参考源码保留各自的许可证。
+
+引擎 [VirtualAndroid-qemu](https://github.com/spianmo/VirtualAndroid-qemu) 是 QEMU 的分支，
+因此是 GPL-2.0。App 构建时把它作为独立的 framework 嵌入（与 UTM 的做法相同）；
+分发这样的构建产物时，引擎部分需要遵守 GPL。构建依赖在编译时下载，适用各自的许可证。
 本仓库不包含 Android 系统镜像，它来自 Android SDK，适用 Google 的条款。
 
 Android 是 Google LLC 的商标。本项目与 Google、Apple 无关。

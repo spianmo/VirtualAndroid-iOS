@@ -106,8 +106,9 @@ Guest: the official AOSP Android 13 emulator image, unmodified
 | `docs/` | Design notes and measurements |
 
 The QEMU fork (the `ranchu` board, goldfish devices, pipe services, AOT
-runtime, iOS JIT support) lives in its own repository and is checked out at
-`engine/qemu`.
+runtime, iOS JIT support) lives in its own repository,
+[VirtualAndroid-qemu](https://github.com/spianmo/VirtualAndroid-qemu), and is
+checked out at `engine/qemu`.
 
 ## Building
 
@@ -122,8 +123,8 @@ code buffer, renderer). It has only been tested on an iPhone 17 Pro Max
 brew install meson ninja pkg-config bison glib e2fsprogs xcodegen
 
 # Sources (the engine and some build inputs are separate checkouts)
-git clone <this repository> VirtualAndroid && cd VirtualAndroid
-git clone <engine repository> engine/qemu      # the QEMU fork, see above
+git clone https://github.com/spianmo/VirtualAndroid-iOS.git VirtualAndroid && cd VirtualAndroid
+git clone https://github.com/spianmo/VirtualAndroid-qemu.git engine/qemu   # the QEMU fork
 engine/scripts/ios/fetch_deps.sh              # UTM recipe + dependency tarballs
 gfx/scripts/fetch-sources.sh                  # gfxstream, aemu, ANGLE (pinned)
 
@@ -205,13 +206,16 @@ Built on [QEMU](https://www.qemu.org), [UTM](https://github.com/utmapp/UTM)
 
 ## License
 
-See [LICENSE](LICENSE). Third-party code keeps its own license: QEMU and the
-engine fork are GPL-2.0; the Android emulator reference sources in
-`third_party/ref-emu` are Apache-2.0 or GPL-2.0 as marked in each file (the few
-unmarked ones come from AOSP, Apache-2.0);
-gfxstream, aemu, ANGLE and MoltenVK are fetched at build time under their own
-licenses. The Android system image is not included; it comes from the Android
-SDK under Google's terms.
+Apache License 2.0, see [LICENSE](LICENSE). [NOTICE](NOTICE) lists the
+exceptions: a few files here are GPL-2.0-or-later as stated in their headers,
+and the reference sources in `third_party/ref-emu` keep their own licenses.
+
+The engine, [VirtualAndroid-qemu](https://github.com/spianmo/VirtualAndroid-qemu),
+is a QEMU fork and therefore GPL-2.0. An app build embeds it as a separate
+framework (the same arrangement as UTM); distributing such a build means
+following the GPL for the engine. Build dependencies are downloaded at build
+time under their own licenses. The Android system image is not included; it
+comes from the Android SDK under Google's terms.
 
 Android is a trademark of Google LLC. This project is not affiliated with
 Google or Apple.
